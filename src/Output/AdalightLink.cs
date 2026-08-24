@@ -158,19 +158,35 @@ public sealed class AdalightLink : IDisposable
         var total = 6 + payload;
         if (_packet.Length != total) _packet = new byte[total];
 
+        WriteHeader(_packet, ledCount);
+        rgb[..Math.Min(payload, rgb.Length)].CopyTo(_packet.AsSpan(HeaderLength));
+        _ledCount = ledCount;
+    }
+
+    /// <summary>Bytes of framing in front of the colour data.</summary>
+    public const int HeaderLength = 6;
+
+    /// <summary>
+    /// Writes the Adalight framing: the magic word, the LED count minus one as
+    /// big-endian 16 bit, then a checksum over those two bytes. The checksum is
+    /// what lets the firmware find the start of a frame in the middle of a stream
+    /// after a truncated write, instead of staying desynchronised forever.
+    /// </summary>
+    public static void WriteHeader(Span<byte> destination, int ledCount)
+    {
+        if (destination.Length < HeaderLength)
+            throw new ArgumentException($"Need at least {HeaderLength} bytes", nameof(destination));
+
         var adjusted = ledCount - 1;
         var hi = (byte)((adjusted >> 8) & 0xFF);
         var lo = (byte)(adjusted & 0xFF);
 
-        _packet[0] = (byte)'A';
-        _packet[1] = (byte)'d';
-        _packet[2] = (byte)'a';
-        _packet[3] = hi;
-        _packet[4] = lo;
-        _packet[5] = (byte)(hi ^ lo ^ 0x55);
-
-        rgb[..Math.Min(payload, rgb.Length)].CopyTo(_packet.AsSpan(6));
-        _ledCount = ledCount;
+        destination[0] = (byte)'A';
+        destination[1] = (byte)'d';
+        destination[2] = (byte)'a';
+        destination[3] = hi;
+        destination[4] = lo;
+        destination[5] = (byte)(hi ^ lo ^ 0x55);
     }
 
     private void Loop()
