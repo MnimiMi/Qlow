@@ -1,4 +1,7 @@
-# Qlow
+<h1>
+  <img src="assets/logo.png" alt="" width="34" align="top">
+  Qlow
+</h1>
 
 > Ambilight driver for a hand-built LED strip. Captures the screen edge, averages it into zones and streams the result to a WS2812B strip over serial. A Windows tray app with no main window, built so that nothing short of unplugging the board stops it.
 

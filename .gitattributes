@@ -1,0 +1,17 @@
+# Store text with LF in the repository and check it out with whatever the local
+# platform expects. Without this, a Windows clone commits CRLF and every later
+# diff on another machine shows every line as changed.
+* text=auto
+
+# Windows tooling is happier finding CRLF in these, so pin them.
+*.csproj   text eol=crlf
+*.sln      text eol=crlf
+*.ps1      text eol=crlf
+*.manifest text eol=crlf
+
+# Arduino sketches are read on every platform; keep them LF.
+*.ino text eol=lf
+
+# Never let line-ending conversion near these.
+*.ico binary
+*.png binary
