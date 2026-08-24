@@ -1,6 +1,6 @@
 using System.IO.Ports;
 
-namespace BaldLight.Output;
+namespace Qlow.Output;
 
 /// <summary>
 /// Owns the serial connection and is the only thing allowed to touch it.
@@ -36,6 +36,27 @@ public sealed class AdalightLink : IDisposable
     public DateTime LastWriteUtc { get; private set; }
     public long FramesWritten { get; private set; }
 
+    /// <summary>
+    /// How many times the controller has announced itself since the port was opened.
+    /// Anything beyond the greeting at connect means the board rebooted underneath us,
+    /// which the serial handle cannot see: on a Nano the USB bridge and the MCU are
+    /// separate chips, so a brownout resets the MCU while the COM port stays healthy
+    /// and every write keeps succeeding.
+    /// </summary>
+    public long ControllerReboots { get; private set; }
+    public DateTime? LastRebootUtc { get; private set; }
+
+    private readonly byte[] _rxBuffer = new byte[512];
+    private readonly System.Text.StringBuilder _rxLine = new(80);
+    private int _rxMatch;
+    private bool _loggedFirstRx;
+
+    /// <summary>Reset cause the controller reported on its last boot, if it reports one.</summary>
+    public string? LastResetCause { get; private set; }
+
+    /// <summary>Most recent supply and survival telemetry from the controller.</summary>
+    public string? LastDiagnostics { get; private set; }
+
     public event Action? StateChanged;
 
     public AdalightLink(SerialConfig config, WatchdogConfig watchdog)
@@ -67,7 +88,7 @@ public sealed class AdalightLink : IDisposable
         _thread = new Thread(Loop)
         {
             IsBackground = true,
-            Name = "BaldLight.Serial",
+            Name = "Qlow.Serial",
             Priority = ThreadPriority.AboveNormal
         };
         _thread.Start();
@@ -197,12 +218,15 @@ public sealed class AdalightLink : IDisposable
                 _port!.Write(packet, 0, length);
                 LastWriteUtc = DateTime.UtcNow;
                 FramesWritten++;
+
+                DrainIncoming();
             }
             catch (Exception ex) when (ex is IOException or TimeoutException or UnauthorizedAccessException
                                            or InvalidOperationException or ObjectDisposedException)
             {
-                // This is the failure Prismatik swallows: the handle is dead but the
-                // app keeps writing into it. Close, forget the port, and re-locate.
+                // The endpoint is gone. Keeping the handle open would leave the app
+                // looking healthy while writing into nothing, so close it, forget the
+                // port, and go find the device again.
                 Log.Warn($"Serial write failed on {PortName}: {ex.GetType().Name}: {ex.Message}");
                 ClosePort("write failed");
                 _wake.WaitOne(backoff);
@@ -257,6 +281,12 @@ public sealed class AdalightLink : IDisposable
 
             PortName = name;
             _port = port;
+            _rxMatch = 0;
+            _rxLine.Clear();
+            _loggedFirstRx = false;
+            LastResetCause = null;
+            LastRebootUtc = null;
+            ControllerReboots = 0;
 
             // The AVR bootloader listens for a moment before handing over to the
             // sketch; bytes sent during that window are lost or misread.
@@ -272,6 +302,149 @@ public sealed class AdalightLink : IDisposable
             SetConnected(false);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Reads whatever the controller has sent back and watches for its boot greeting.
+    /// The stock Adalight sketch writes "Ada\n" once on startup, right after flashing
+    /// the strip red, green and blue as a wiring test. Seeing that mid-session is
+    /// proof the board reset, and it is the only signal there is: the write side
+    /// stays perfectly happy throughout.
+    /// </summary>
+    private void DrainIncoming()
+    {
+        var port = _port;
+        if (port is not { IsOpen: true }) return;
+
+        int available;
+        try { available = port.BytesToRead; }
+        catch { return; }
+        if (available <= 0) return;
+
+        int read;
+        try { read = port.Read(_rxBuffer, 0, Math.Min(available, _rxBuffer.Length)); }
+        catch { return; }
+        if (read <= 0) return;
+
+        if (!_loggedFirstRx)
+        {
+            _loggedFirstRx = true;
+            Log.Info($"Controller greeting: {Printable(_rxBuffer, read)}");
+        }
+        else
+        {
+            Log.Debug($"Controller sent {read} bytes: {Printable(_rxBuffer, read)}");
+        }
+
+        for (var i = 0; i < read; i++)
+        {
+            var b = _rxBuffer[i];
+
+            // Watch for the boot greeting.
+            var expected = _rxMatch switch { 0 => (byte)'A', 1 => (byte)'d', _ => (byte)'a' };
+            if (b == expected)
+            {
+                if (++_rxMatch == 3)
+                {
+                    _rxMatch = 0;
+                    NoteReboot();
+                }
+            }
+            else
+            {
+                _rxMatch = b == (byte)'A' ? 1 : 0;
+            }
+
+            // Independently, reassemble text lines so a firmware that reports its
+            // reset cause can be understood.
+            if (b == (byte)'\n')
+            {
+                InterpretLine(_rxLine.ToString());
+                _rxLine.Clear();
+            }
+            else if (b is >= 32 and < 127)
+            {
+                if (_rxLine.Length < 80) _rxLine.Append((char)b);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The bundled firmware reports why the chip reset, straight out of MCUSR. That
+    /// turns a repeating fault from something to speculate about into something with
+    /// a named cause: a brownout, a pulled RESET pin, a watchdog, or a lost supply.
+    /// Older sketches say nothing, and that is fine.
+    /// </summary>
+    private void InterpretLine(string line)
+    {
+        line = line.Trim();
+        if (line.Length == 0) return;
+
+        // Supply and survival telemetry: "diag ram=KEPT boot=3 vcc=4890 vmin=4720".
+        // vmin is the lowest supply the chip has measured since it last lost power,
+        // which is the number that settles whether the supply is actually sagging.
+        if (line.StartsWith("diag ", StringComparison.OrdinalIgnoreCase))
+        {
+            LastDiagnostics = line[5..].Trim();
+
+            var vmin = System.Text.RegularExpressions.Regex.Match(line, @"vmin=(\d+)");
+            if (vmin.Success && int.TryParse(vmin.Groups[1].Value, out var mv) && mv is > 0 and < 4400)
+                Log.Warn($"Controller supply dipped to {mv} mV -- {line}");
+            else
+                Log.Info($"Controller {line}");
+
+            return;
+        }
+
+        if (!line.StartsWith("rst=", StringComparison.OrdinalIgnoreCase))
+        {
+            Log.Debug($"Controller said: {line}");
+            return;
+        }
+
+        LastResetCause = line[4..].Trim();
+
+        var meaning = LastResetCause switch
+        {
+            var s when s.Contains("BROWNOUT", StringComparison.OrdinalIgnoreCase) =>
+                "supply dipped below the brown-out threshold: current, wiring or the supply itself",
+            var s when s.Contains("EXTERNAL", StringComparison.OrdinalIgnoreCase) =>
+                "something pulled the RESET pin low: DTR from the USB bridge, or noise on that line",
+            var s when s.Contains("WDT", StringComparison.OrdinalIgnoreCase) =>
+                "the sketch stopped feeding the watchdog, so the firmware hung",
+            var s when s.Contains("POWERON", StringComparison.OrdinalIgnoreCase) =>
+                "the supply went away completely and came back: a break in the power path",
+            _ => "cause not reported"
+        };
+
+        Log.Warn($"Controller reset cause: {LastResetCause} -- {meaning}");
+    }
+
+    private void NoteReboot()
+    {
+        var now = DateTime.UtcNow;
+        var previous = LastRebootUtc;
+        LastRebootUtc = now;
+        ControllerReboots++;
+
+        var gap = previous.HasValue
+            ? $"{(now - previous.Value).TotalSeconds:F1}s since the last one"
+            : "first since the port opened";
+
+        Log.Warn($"Controller rebooted ({gap}, {ControllerReboots} total). " +
+                 "The serial link never dropped, so this is the board resetting on its own: " +
+                 "brownout, a loose supply or data lead, or a watchdog in the sketch.");
+    }
+
+    private static string Printable(byte[] buffer, int count)
+    {
+        var chars = new char[count];
+        for (var i = 0; i < count; i++)
+        {
+            var b = buffer[i];
+            chars[i] = b is >= 32 and < 127 ? (char)b : '.';
+        }
+        return $"\"{new string(chars)}\"";
     }
 
     private void ClosePort(string reason)

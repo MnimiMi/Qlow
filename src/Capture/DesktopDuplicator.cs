@@ -3,7 +3,7 @@ using Vortice.Direct3D;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
 
-namespace BaldLight.Capture;
+namespace Qlow.Capture;
 
 /// <summary>
 /// A downscaled BGRA snapshot of the desktop. Width/Height are the mip dimensions,
@@ -18,14 +18,30 @@ public sealed class CapturedFrame
 }
 
 /// <summary>
+/// Why a grab returned what it did. The caller has to tell these apart: a screen
+/// that simply is not changing is healthy and must not be mistaken for a broken
+/// pipeline, or the recovery logic ends up fighting an idle desktop.
+/// </summary>
+public enum CaptureStatus
+{
+    /// <summary>Fresh content was captured.</summary>
+    NewFrame,
+
+    /// <summary>Duplication is fine, nothing on screen changed within the timeout.</summary>
+    Unchanged,
+
+    /// <summary>Duplication is gone or being rebuilt; no frame is available.</summary>
+    Unavailable
+}
+
+/// <summary>
 /// DXGI Desktop Duplication with unconditional recovery.
 ///
 /// Duplication is lost on a long list of everyday events: entering or leaving
 /// exclusive fullscreen, a GPU driver reset, the UAC secure desktop, a resolution
 /// or refresh-rate change, the monitor powering down, an RDP session attaching.
-/// Every one of those must be treated as "tear it all down and build it again",
-/// which is exactly what Prismatik gets wrong. Nothing here throws outward: the
-/// caller only ever sees a frame or a null.
+/// Every one of those must be treated as "tear it all down and build it again".
+/// Nothing here throws outward: the caller only ever sees a frame or a null.
 /// </summary>
 public sealed class DesktopDuplicator : IDisposable
 {
@@ -55,6 +71,17 @@ public sealed class DesktopDuplicator : IDisposable
     public bool IsReady => _duplication != null;
     public string Description { get; private set; } = "not initialised";
 
+    /// <summary>
+    /// Counts frames that actually went through the downscale, as opposed to calls
+    /// that timed out and handed back the previous frame. Benchmarks need to tell
+    /// those apart; nothing else does.
+    /// </summary>
+    public long FramesDownscaled { get; private set; }
+
+    public int MipLevel => _mipLevel;
+    public int MipWidth => _mipWidth;
+    public int MipHeight => _mipHeight;
+
     public DesktopDuplicator(int monitorIndex, int desiredWidth)
     {
         _monitorIndex = Math.Max(0, monitorIndex);
@@ -65,9 +92,13 @@ public sealed class DesktopDuplicator : IDisposable
     /// Grabs a frame. Returns the previous frame when the desktop simply has not
     /// changed, and null when the pipeline is being rebuilt.
     /// </summary>
-    public CapturedFrame? TryGrab(int timeoutMs)
+    public CapturedFrame? TryGrab(int timeoutMs, out CaptureStatus status)
     {
-        if (!EnsureInitialised()) return null;
+        if (!EnsureInitialised())
+        {
+            status = CaptureStatus.Unavailable;
+            return null;
+        }
 
         try
         {
@@ -79,6 +110,7 @@ public sealed class DesktopDuplicator : IDisposable
             {
                 // Nothing changed on screen. Not an error, and the strip should keep
                 // showing whatever it already shows.
+                status = CaptureStatus.Unchanged;
                 return _last;
             }
 
@@ -86,6 +118,7 @@ public sealed class DesktopDuplicator : IDisposable
             {
                 Log.Warn($"AcquireNextFrame failed: {result} ({DescribeResult(result)}), rebuilding");
                 Teardown();
+                status = CaptureStatus.Unavailable;
                 return null;
             }
 
@@ -94,11 +127,15 @@ public sealed class DesktopDuplicator : IDisposable
             using (resource)
             {
                 // LastPresentTime == 0 means only the cursor moved.
-                if (frameInfo.LastPresentTime == 0) return _last;
-                if (resource == null) return _last;
+                if (frameInfo.LastPresentTime == 0 || resource == null)
+                {
+                    status = CaptureStatus.Unchanged;
+                    return _last;
+                }
 
                 using var desktop = resource.QueryInterface<ID3D11Texture2D>();
                 _last = Downscale(desktop);
+                status = CaptureStatus.NewFrame;
                 return _last;
             }
         }
@@ -106,12 +143,14 @@ public sealed class DesktopDuplicator : IDisposable
         {
             Log.Warn($"Capture threw {ex.ResultCode} ({DescribeResult(ex.ResultCode)}), rebuilding");
             Teardown();
+            status = CaptureStatus.Unavailable;
             return null;
         }
         catch (Exception ex)
         {
             Log.Error("Capture threw, rebuilding", ex);
             Teardown();
+            status = CaptureStatus.Unavailable;
             return null;
         }
     }
@@ -154,6 +193,7 @@ public sealed class DesktopDuplicator : IDisposable
             };
 
             System.Runtime.InteropServices.Marshal.Copy(map.DataPointer, frame.Pixels, 0, frame.Pixels.Length);
+            FramesDownscaled++;
             return frame;
         }
         finally
@@ -267,7 +307,6 @@ public sealed class DesktopDuplicator : IDisposable
             _duplication = _output1!.DuplicateOutput(_device);
             _sourceWidth = 0;
             _sourceHeight = 0;
-            _last = null;
 
             Log.Info($"Capture ready on {Description}");
             return true;
@@ -295,6 +334,13 @@ public sealed class DesktopDuplicator : IDisposable
         try { _duplication?.ReleaseFrame(); } catch { }
     }
 
+    /// <summary>
+    /// Drops every DXGI and D3D object so the next grab builds them again.
+    ///
+    /// The last captured frame deliberately survives. It is still the most recent
+    /// thing that was on screen, and discarding it means a rebuild on an idle desktop
+    /// has nothing to return, which reads as a failure and triggers another rebuild.
+    /// </summary>
     private void Teardown()
     {
         ReleaseHeldFrame();
@@ -318,7 +364,6 @@ public sealed class DesktopDuplicator : IDisposable
         _output1 = null;
         _adapter = null;
         _factory = null;
-        _last = null;
         _sourceWidth = 0;
         _sourceHeight = 0;
     }

@@ -3,12 +3,12 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
-namespace BaldLight;
+namespace Qlow;
 
 /// <summary>
 /// One LED sampling window, stored in normalised screen coordinates (0..1).
-/// Prismatik stores absolute pixels, so a resolution change silently corrupts its
-/// layout; normalised rects survive that.
+/// Absolute pixel coordinates have to be rebuilt every time the resolution changes;
+/// normalised rects survive it untouched.
 /// </summary>
 public sealed class LedZone
 {
@@ -165,6 +165,190 @@ public sealed class LedLayout
     }
 
     /// <summary>
+    /// Imports a layout from another ambilight tool, picking the reader by what the
+    /// file actually is rather than by extension alone.
+    /// </summary>
+    public static LedLayout? ImportFromFile(string path)
+    {
+        try
+        {
+            if (!File.Exists(path))
+            {
+                Log.Warn($"Import failed: {path} does not exist");
+                return null;
+            }
+
+            var extension = Path.GetExtension(path).ToLowerInvariant();
+
+            if (extension == ".ini") return ImportPrismatikProfileFile(path);
+            if (extension == ".json") return ImportFromHyperion(path);
+
+            Log.Warn($"Import failed: {path} is neither a .json layout nor a .ini profile");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"Import from {path} failed", ex);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Reads a Hyperion, Hyperion.ng or HyperHDR layout. Their coordinates are already
+    /// fractions of the screen, so this is a straight translation of min/max pairs into
+    /// the rects used here.
+    ///
+    /// Two shapes exist in the wild and both are accepted: classic Hyperion nests the
+    /// ranges under "hscan"/"vscan" with "minimum"/"maximum", while Hyperion.ng and
+    /// HyperHDR flatten them to "hmin"/"hmax"/"vmin"/"vmax".
+    ///
+    /// Note that Hyperion.ng 2.x keeps its settings in a SQLite database rather than a
+    /// JSON file, so this expects a config exported from its web UI.
+    /// </summary>
+    public static LedLayout? ImportFromHyperion(string path)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(path), new JsonDocumentOptions
+            {
+                AllowTrailingCommas = true,
+                CommentHandling = JsonCommentHandling.Skip
+            });
+
+            if (!TryFindLedsArray(document.RootElement, out var leds))
+            {
+                Log.Warn($"Import failed: no \"leds\" array found in {path}");
+                return null;
+            }
+
+            var entries = new List<(int Index, LedZone Zone)>();
+            var fallbackIndex = 0;
+
+            foreach (var led in leds.EnumerateArray())
+            {
+                if (led.ValueKind != JsonValueKind.Object) continue;
+                if (!TryReadRanges(led, out var hMin, out var hMax, out var vMin, out var vMax)) continue;
+
+                // Some exports write the pair the other way round.
+                if (hMax < hMin) (hMin, hMax) = (hMax, hMin);
+                if (vMax < vMin) (vMin, vMax) = (vMax, vMin);
+
+                var index = led.TryGetProperty("index", out var idx) && idx.TryGetInt32(out var parsed)
+                    ? parsed
+                    : fallbackIndex;
+                fallbackIndex++;
+
+                entries.Add((index, new LedZone
+                {
+                    X = Math.Clamp(hMin, 0, 1),
+                    Y = Math.Clamp(vMin, 0, 1),
+                    W = Math.Clamp(hMax - hMin, 0, 1),
+                    H = Math.Clamp(vMax - vMin, 0, 1)
+                }));
+            }
+
+            if (entries.Count == 0)
+            {
+                Log.Warn($"Import failed: \"leds\" in {path} held no usable entries");
+                return null;
+            }
+
+            var layout = new LedLayout();
+            foreach (var entry in entries.OrderBy(e => e.Index)) layout.Zones.Add(entry.Zone);
+
+            Log.Info($"Imported {layout.Count} zones from Hyperion layout {path}");
+            return layout;
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"Hyperion import from {path} failed", ex);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Finds the "leds" array, whether it sits at the root or inside a per-instance
+    /// wrapper, and tolerates a file that is just the array on its own.
+    /// </summary>
+    private static bool TryFindLedsArray(JsonElement root, out JsonElement leds)
+    {
+        leds = default;
+
+        if (root.ValueKind == JsonValueKind.Array)
+        {
+            leds = root;
+            return true;
+        }
+
+        if (root.ValueKind != JsonValueKind.Object) return false;
+
+        if (root.TryGetProperty("leds", out var direct) && direct.ValueKind == JsonValueKind.Array)
+        {
+            leds = direct;
+            return true;
+        }
+
+        foreach (var property in root.EnumerateObject())
+        {
+            if (property.Value.ValueKind == JsonValueKind.Object &&
+                TryFindLedsArray(property.Value, out leds))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryReadRanges(JsonElement led, out double hMin, out double hMax, out double vMin, out double vMax)
+    {
+        hMin = hMax = vMin = vMax = 0;
+
+        // Hyperion.ng and HyperHDR: flat hmin/hmax/vmin/vmax.
+        if (TryReadDouble(led, "hmin", out hMin) && TryReadDouble(led, "hmax", out hMax) &&
+            TryReadDouble(led, "vmin", out vMin) && TryReadDouble(led, "vmax", out vMax))
+            return true;
+
+        // Classic Hyperion: hscan/vscan objects with minimum/maximum.
+        if (led.TryGetProperty("hscan", out var hscan) && led.TryGetProperty("vscan", out var vscan) &&
+            TryReadDouble(hscan, "minimum", out hMin) && TryReadDouble(hscan, "maximum", out hMax) &&
+            TryReadDouble(vscan, "minimum", out vMin) && TryReadDouble(vscan, "maximum", out vMax))
+            return true;
+
+        return false;
+    }
+
+    private static bool TryReadDouble(JsonElement element, string name, out double value)
+    {
+        value = 0;
+        return element.ValueKind == JsonValueKind.Object
+               && element.TryGetProperty(name, out var property)
+               && property.ValueKind == JsonValueKind.Number
+               && property.TryGetDouble(out value);
+    }
+
+    /// <summary>
+    /// Imports a Prismatik profile chosen directly. The profile itself never records
+    /// how many LEDs are wired up, so main.conf has to be found alongside it.
+    /// </summary>
+    private static LedLayout? ImportPrismatikProfileFile(string profilePath)
+    {
+        var profilesDir = Path.GetDirectoryName(profilePath);
+        var root = profilesDir == null ? null : Path.GetDirectoryName(profilesDir);
+
+        foreach (var candidate in new[]
+                 {
+                     root == null ? null : Path.Combine(root, "main.conf"),
+                     profilesDir == null ? null : Path.Combine(profilesDir, "main.conf")
+                 })
+        {
+            if (candidate != null && File.Exists(candidate))
+                return ImportFromPrismatik(profilePath, candidate);
+        }
+
+        Log.Warn($"Import failed: no main.conf found next to {profilePath}, so the LED count is unknown");
+        return null;
+    }
+
+    /// <summary>
     /// Reads an existing Prismatik profile and normalises it, so an already tuned
     /// layout does not have to be redrawn by hand.
     /// </summary>
@@ -268,7 +452,7 @@ public sealed class LedLayout
     }
 
     /// <summary>
-    /// Prismatik writes CRLF, and in .NET a multiline "$" anchors before the "\n"
+    /// These files are CRLF, and in .NET a multiline "$" anchors before the "\n"
     /// only. That leaves the "\r" stranded, so a pattern ending in \d+$ never
     /// matches. Every pattern here therefore ends in \s*$ rather than $.
     /// </summary>

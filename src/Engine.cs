@@ -1,10 +1,10 @@
 using System.Diagnostics;
-using BaldLight.Capture;
-using BaldLight.Output;
-using BaldLight.Processing;
+using Qlow.Capture;
+using Qlow.Output;
+using Qlow.Processing;
 using Microsoft.Win32;
 
-namespace BaldLight;
+namespace Qlow;
 
 public enum TestPattern
 {
@@ -47,11 +47,15 @@ public sealed class Engine : IDisposable
 
     private Thread? _captureThread;
     private System.Threading.Timer? _watchdog;
+    private FileSystemWatcher? _configWatcher;
+    private System.Threading.Timer? _reloadDebounce;
+    private string _watchedHash = "";
     private volatile bool _running;
     private volatile bool _paused;
     private volatile bool _testRunning;
 
-    private DateTime _lastFrameUtc = DateTime.UtcNow;
+    private DateTime _lastCaptureHealthyUtc = DateTime.UtcNow;
+    private DateTime _lastHealthLogUtc = DateTime.UtcNow;
     private DateTime _lastFpsSample = DateTime.UtcNow;
     private int _framesSinceSample;
     private double _fps;
@@ -93,12 +97,14 @@ public sealed class Engine : IDisposable
         _captureThread = new Thread(CaptureLoop)
         {
             IsBackground = true,
-            Name = "BaldLight.Capture",
+            Name = "Qlow.Capture",
             Priority = ThreadPriority.AboveNormal
         };
         _captureThread.Start();
 
         _watchdog = new System.Threading.Timer(WatchdogTick, null, 1000, 1000);
+
+        StartConfigWatcher();
 
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
         SystemEvents.SessionSwitch += OnSessionSwitch;
@@ -116,6 +122,12 @@ public sealed class Engine : IDisposable
 
         _watchdog?.Dispose();
         _watchdog = null;
+
+        if (_configWatcher != null) _configWatcher.EnableRaisingEvents = false;
+        _configWatcher?.Dispose();
+        _configWatcher = null;
+        _reloadDebounce?.Dispose();
+        _reloadDebounce = null;
 
         _captureThread?.Join(TimeSpan.FromSeconds(3));
         _captureThread = null;
@@ -142,6 +154,86 @@ public sealed class Engine : IDisposable
 
         Log.Info($"Backlight {(enabled ? "enabled" : "disabled")}");
         StatusChanged?.Invoke();
+    }
+
+    /// <summary>
+    /// Applies edits to config.json and layout.json without anyone having to restart
+    /// or find a menu item. Editing a file and seeing nothing happen is a bad enough
+    /// surprise that it is worth the small amount of machinery.
+    ///
+    /// Loading the config rewrites it, which would otherwise make the watcher
+    /// retrigger itself forever, so changes are compared by content hash rather than
+    /// by the fact that a write happened.
+    /// </summary>
+    private void StartConfigWatcher()
+    {
+        try
+        {
+            Directory.CreateDirectory(AppConfig.Directory);
+            _watchedHash = HashWatchedFiles();
+
+            _configWatcher = new FileSystemWatcher(AppConfig.Directory, "*.json")
+            {
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName,
+                EnableRaisingEvents = true
+            };
+
+            // Editors save in several steps, so wait for the dust to settle rather
+            // than reacting to each individual write.
+            void Bump(object? _, FileSystemEventArgs __) =>
+                _reloadDebounce?.Change(800, Timeout.Infinite);
+
+            _configWatcher.Changed += Bump;
+            _configWatcher.Created += Bump;
+            _configWatcher.Renamed += (_, _) => _reloadDebounce?.Change(800, Timeout.Infinite);
+
+            _reloadDebounce = new System.Threading.Timer(_ =>
+            {
+                try
+                {
+                    var hash = HashWatchedFiles();
+                    if (hash == _watchedHash) return;
+
+                    Log.Info("Config or layout changed on disk, reloading");
+                    ReloadConfig();
+                    _watchedHash = HashWatchedFiles();
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("Automatic reload failed", ex);
+                }
+            }, null, Timeout.Infinite, Timeout.Infinite);
+
+            Log.Info($"Watching {AppConfig.Directory} for edits");
+        }
+        catch (Exception ex)
+        {
+            Log.Error("Could not watch the config directory; edits will need a manual reload", ex);
+        }
+    }
+
+    private static string HashWatchedFiles()
+    {
+        var sb = new System.Text.StringBuilder();
+
+        foreach (var path in new[] { AppConfig.FilePath, LedLayout.FilePath })
+        {
+            try
+            {
+                if (!File.Exists(path)) { sb.Append('-'); continue; }
+                using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var sha = System.Security.Cryptography.SHA256.Create();
+                sb.Append(Convert.ToHexString(sha.ComputeHash(stream)));
+            }
+            catch
+            {
+                // Mid-save the file can be briefly unreadable; treat it as unchanged
+                // and let the next event settle it.
+                sb.Append('?');
+            }
+        }
+
+        return sb.ToString();
     }
 
     public void ReloadConfig()
@@ -222,7 +314,7 @@ public sealed class Engine : IDisposable
                 StatusChanged?.Invoke();
             }
         })
-        { IsBackground = true, Name = "BaldLight.Test" };
+        { IsBackground = true, Name = "Qlow.Test" };
 
         worker.Start();
     }
@@ -326,9 +418,9 @@ public sealed class Engine : IDisposable
             _duplicator ??= new DesktopDuplicator(config.Capture.MonitorIndex, config.Capture.DownscaleWidth);
 
             var frameIntervalMs = 1000.0 / Math.Clamp(config.Capture.TargetFps, 1, 240);
-            var frame = _duplicator.TryGrab((int)Math.Max(16, frameIntervalMs * 2));
+            var frame = _duplicator.TryGrab((int)Math.Max(16, frameIntervalMs * 2), out var status);
 
-            if (frame == null)
+            if (status == CaptureStatus.Unavailable)
             {
                 // Rebuild is already scheduled inside the duplicator. Back off a
                 // little so a monitor that stays asleep does not spin a core.
@@ -339,7 +431,20 @@ public sealed class Engine : IDisposable
                 continue;
             }
 
+            // Duplication answered, so it is healthy. That includes answering "nothing
+            // changed": an idle desktop is not a fault, and treating it as one is how
+            // the watchdog used to end up rebuilding the stack every few seconds
+            // forever.
             _consecutiveFailures = 0;
+            _lastCaptureHealthyUtc = DateTime.UtcNow;
+
+            if (frame == null)
+            {
+                // Healthy, but nothing has been captured yet at all, so there is
+                // nothing to send. Wait for the screen to do something.
+                Thread.Sleep((int)Math.Max(16, frameIntervalMs));
+                continue;
+            }
 
             if (frame.Width > 0 && frame.Height > 0 && layout.Count > 0)
             {
@@ -347,7 +452,7 @@ public sealed class Engine : IDisposable
                 var bytes = _pipeline.Process(zones);
                 _link.Submit(bytes, layout.Count);
 
-                _lastFrameUtc = DateTime.UtcNow;
+                _lastCaptureHealthyUtc = DateTime.UtcNow;
                 _framesSinceSample++;
             }
 
@@ -374,12 +479,24 @@ public sealed class Engine : IDisposable
 
         try
         {
-            var stalledFor = (DateTime.UtcNow - _lastFrameUtc).TotalMilliseconds;
+            // A heartbeat line every minute, so an intermittent fault can be placed on
+            // a timeline afterwards instead of having to be caught in the act.
+            if ((DateTime.UtcNow - _lastHealthLogUtc).TotalSeconds >= 60)
+            {
+                _lastHealthLogUtc = DateTime.UtcNow;
+                Log.Info($"Health: {_fps:F1} fps captured, {_link.FramesWritten} frames sent on " +
+                         $"{_link.PortName ?? "-"}, {_link.ControllerReboots} controller reboots");
+            }
+
+            // Keyed on the last time duplication answered at all, not on the last new
+            // frame. A static screen answers "nothing changed" and is perfectly
+            // healthy; only silence from the duplication object itself is a fault.
+            var stalledFor = (DateTime.UtcNow - _lastCaptureHealthyUtc).TotalMilliseconds;
             if (stalledFor > _config.Watchdog.CaptureStallMs)
             {
-                Log.Warn($"No frame for {stalledFor:F0} ms, forcing capture rebuild");
+                Log.Warn($"Capture unavailable for {stalledFor:F0} ms, forcing rebuild");
                 _duplicator?.Invalidate("watchdog stall");
-                _lastFrameUtc = DateTime.UtcNow;
+                _lastCaptureHealthyUtc = DateTime.UtcNow;
             }
         }
         catch (Exception ex)
@@ -404,7 +521,7 @@ public sealed class Engine : IDisposable
                 // always invalid by then. Rebuild both rather than hoping.
                 _paused = false;
                 _pipeline.Reset();
-                _lastFrameUtc = DateTime.UtcNow;
+                _lastCaptureHealthyUtc = DateTime.UtcNow;
                 _duplicator?.Invalidate("resumed from sleep");
                 _link.ForceReconnect("resumed from sleep");
                 break;
@@ -432,7 +549,7 @@ public sealed class Engine : IDisposable
             case SessionSwitchReason.ConsoleConnect:
                 _paused = false;
                 _pipeline.Reset();
-                _lastFrameUtc = DateTime.UtcNow;
+                _lastCaptureHealthyUtc = DateTime.UtcNow;
                 // The lock screen runs on a separate desktop, so duplication was lost.
                 _duplicator?.Invalidate("session unlocked");
                 break;
@@ -444,7 +561,7 @@ public sealed class Engine : IDisposable
     private void OnDisplaySettingsChanged(object? sender, EventArgs e)
     {
         Log.Info("Display settings changed");
-        _lastFrameUtc = DateTime.UtcNow;
+        _lastCaptureHealthyUtc = DateTime.UtcNow;
         _duplicator?.Invalidate("display settings changed");
         StatusChanged?.Invoke();
     }

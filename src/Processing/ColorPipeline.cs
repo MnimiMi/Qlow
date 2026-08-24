@@ -1,6 +1,6 @@
-using BaldLight.Capture;
+using Qlow.Capture;
 
-namespace BaldLight.Processing;
+namespace Qlow.Processing;
 
 /// <summary>
 /// Turns averaged zone colours into the bytes the strip wants: vibrance, white
@@ -21,6 +21,9 @@ public sealed class ColorPipeline
 
     private double[] _gammaTable = Array.Empty<double>();
     private double _gammaTableFor = double.NaN;
+
+    private string? _darkColorFor;
+    private double _darkR = 1, _darkG = 1, _darkB = 1;
 
     public ColorPipeline(ColorConfig color, PowerConfig power, string colorOrder)
     {
@@ -84,14 +87,15 @@ public sealed class ColorPipeline
         var brightness = Math.Clamp(_color.Brightness, 0, 100) / 100.0;
         var (tr, tg, tb) = TemperatureScale(_color.TemperatureK);
         double minLum = Math.Clamp(_color.MinLuminance, 0, 255);
+        var floorLuma = Math.Clamp(_color.MinBrightness, 0, 100) / 100.0 * 255.0;
 
         // Pass one: shape and smooth, writing straight into the output bytes.
         for (var i = 0; i < zones.Length; i++)
         {
             var c = zones[i];
 
-            // Vibrance: push each channel away from the zone average. Cheap, and it
-            // matches what Prismatik calls OverBrighten closely enough to feel the same.
+            // Vibrance: push each channel away from the zone average. Cheap, and at
+            // these magnitudes close enough to a proper saturation boost.
             if (vibrance > 0)
             {
                 var mean = (c.R + c.G + c.B) / 3.0;
@@ -125,6 +129,8 @@ public sealed class ColorPipeline
                 _gammaTable[(int)Math.Clamp(Math.Round(s.B), 0, 255)] * brightness
             };
 
+            ApplyBrightnessFloor(src, floorLuma);
+
             var o = i * 3;
             _bytes[o] = (byte)Math.Clamp(Math.Round(src[_order[0]]), 0, 255);
             _bytes[o + 1] = (byte)Math.Clamp(Math.Round(src[_order[1]]), 0, 255);
@@ -133,6 +139,85 @@ public sealed class ColorPipeline
 
         ApplyCurrentLimit();
         return _bytes;
+    }
+
+    /// <summary>
+    /// Keeps a zone from going fully dark, so a black screen leaves a low ambient glow
+    /// rather than nothing at all.
+    ///
+    /// Applied per zone rather than to the frame as a whole, which means an entirely
+    /// black screen is simply the case where every zone hits the floor at once. A zone
+    /// that still has some colour is scaled up and keeps its hue; one that is genuinely
+    /// black has no hue to keep, so it takes DarkColor instead.
+    ///
+    /// This runs after gamma and brightness, so the floor is a real output level, and
+    /// before the current limiter, which still has the last word.
+    /// </summary>
+    private void ApplyBrightnessFloor(double[] rgb, double floorLuma)
+    {
+        if (floorLuma <= 0) return;
+
+        var luma = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+        if (luma >= floorLuma) return;
+
+        if (luma > 0.5)
+        {
+            // Lift towards the floor, preserving the ratios between channels. A very
+            // saturated colour can clip one channel on the way up; at the low floor
+            // values this setting is meant for, that is not visible.
+            var scale = floorLuma / luma;
+            rgb[0] = Math.Min(255, rgb[0] * scale);
+            rgb[1] = Math.Min(255, rgb[1] * scale);
+            rgb[2] = Math.Min(255, rgb[2] * scale);
+            return;
+        }
+
+        EnsureDarkColor();
+        rgb[0] = _darkR * floorLuma;
+        rgb[1] = _darkG * floorLuma;
+        rgb[2] = _darkB * floorLuma;
+    }
+
+    /// <summary>
+    /// Normalises DarkColor so that multiplying it by a luma target lands exactly on
+    /// that luma. Cached because parsing a hex string per LED per frame would be silly.
+    /// </summary>
+    private void EnsureDarkColor()
+    {
+        var spec = string.IsNullOrWhiteSpace(_color.DarkColor) ? "#FFFFFF" : _color.DarkColor.Trim();
+        if (spec == _darkColorFor) return;
+
+        _darkColorFor = spec;
+
+        var text = spec.StartsWith('#') ? spec[1..] : spec;
+        double r = 255, g = 255, b = 255;
+
+        if (text.Length == 6
+            && int.TryParse(text[..2], System.Globalization.NumberStyles.HexNumber, null, out var pr)
+            && int.TryParse(text.Substring(2, 2), System.Globalization.NumberStyles.HexNumber, null, out var pg)
+            && int.TryParse(text.Substring(4, 2), System.Globalization.NumberStyles.HexNumber, null, out var pb))
+        {
+            r = pr;
+            g = pg;
+            b = pb;
+        }
+        else
+        {
+            Log.Warn($"color.darkColor '{spec}' is not a #RRGGBB value, using white");
+        }
+
+        var luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        if (luma < 1)
+        {
+            // A black DarkColor would make the floor a no-op, which is never what
+            // anyone means by it.
+            r = g = b = 255;
+            luma = 255;
+        }
+
+        _darkR = r / luma;
+        _darkG = g / luma;
+        _darkB = b / luma;
     }
 
     /// <summary>

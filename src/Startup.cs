@@ -1,12 +1,12 @@
 using Microsoft.Win32;
 
-namespace BaldLight;
+namespace Qlow;
 
 /// <summary>Per-user autostart entry. HKCU only, so it never needs elevation.</summary>
 public static class Startup
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string ValueName = "BaldLight";
+    private const string ValueName = "Qlow";
 
     public static bool IsEnabled()
     {

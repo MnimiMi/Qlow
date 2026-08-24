@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace BaldLight;
+namespace Qlow;
 
 public sealed class SerialConfig
 {
@@ -81,10 +81,21 @@ public sealed class ColorConfig
     public double Gamma { get; set; } = 2.0;
     /// <summary>Master brightness, 0-100.</summary>
     public int Brightness { get; set; } = 100;
-    /// <summary>Saturation boost, 0-100. Prismatik calls this OverBrighten.</summary>
+    /// <summary>Saturation boost, 0-100.</summary>
     public int Vibrance { get; set; } = 41;
     /// <summary>0 = no smoothing, 0.95 = very slow. Applied per frame.</summary>
     public double Smoothing { get; set; } = 0.55;
+    /// <summary>
+    /// Lowest brightness a zone is allowed to fall to, 0-100. 0 disables the floor and
+    /// a black screen means a dark strip. Set to, say, 10 to keep a low ambient glow.
+    /// A zone that still has colour keeps its hue on the way up; one that is genuinely
+    /// black uses DarkColor.
+    /// </summary>
+    public int MinBrightness { get; set; }
+
+    /// <summary>Hue used by MinBrightness when a zone has no colour of its own, as #RRGGBB.</summary>
+    public string DarkColor { get; set; } = "#FFFFFF";
+
     /// <summary>Zones dimmer than this (0-255) are forced to black to kill sensor noise.</summary>
     public int MinLuminance { get; set; } = 2;
     /// <summary>Set to 0 to disable white-balance correction.</summary>
@@ -125,7 +136,7 @@ public sealed class AppConfig
     public WatchdogConfig Watchdog { get; set; } = new();
 
     public static string Directory { get; } =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "BaldLight");
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Qlow");
 
     public static string FilePath { get; } = Path.Combine(Directory, "config.json");
 
@@ -181,6 +192,6 @@ public sealed class AppConfig
 
     private void Apply()
     {
-        Log.MinLevel = Enum.TryParse<LogLevel>(LogLevel, true, out var lvl) ? lvl : BaldLight.LogLevel.Info;
+        Log.MinLevel = Enum.TryParse<LogLevel>(LogLevel, true, out var lvl) ? lvl : Qlow.LogLevel.Info;
     }
 }

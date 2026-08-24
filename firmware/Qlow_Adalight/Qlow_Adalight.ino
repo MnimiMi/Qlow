@@ -1,4 +1,4 @@
-// BaldLight firmware - an Adalight-compatible receiver built to fail safely.
+// Qlow firmware - an Adalight-compatible receiver built to fail safely.
 //
 // Differences from the stock Adalight sketch, all of them aimed at the strip
 // going dark for no visible reason:
@@ -21,7 +21,7 @@
 // ---------------------------------------------------------------------------
 
 #define NUM_LEDS      120
-#define DATA_PIN      6
+#define DATA_PIN      5
 #define LED_TYPE      WS2812B
 #define COLOR_ORDER   RGB
 
@@ -44,9 +44,67 @@
 // looks like a dead board until it is reflashed with an ISP programmer.
 #define USE_WATCHDOG  0
 
-#if USE_WATCHDOG
 #include <avr/wdt.h>
-#endif
+
+// ---------------------------------------------------------------------------
+// Reset cause reporting
+// ---------------------------------------------------------------------------
+//
+// MCUSR records why the chip last reset, but it is not cleared by a reset, so the
+// flags accumulate until something wipes them. It also has to be read before the
+// bootloader or any library gets a chance to clear it. Placing this in .init3 runs
+// it before main(), which is early enough.
+//
+// The four flags answer very different questions:
+//   BORF  brown-out   supply dipped below the detector threshold
+//   EXTRF external    something pulled the RESET pin low
+//   WDRF  watchdog    the sketch stopped feeding the timer
+//   PORF  power-on    supply went away completely and came back
+
+static uint8_t resetFlags __attribute__((section(".noinit")));
+
+void captureResetFlags(void) __attribute__((naked, used, section(".init3")));
+void captureResetFlags(void) {
+  resetFlags = MCUSR;
+  MCUSR = 0;
+  wdt_disable();
+}
+
+// ---------------------------------------------------------------------------
+// Survival state and supply monitoring
+// ---------------------------------------------------------------------------
+//
+// MCUSR reading zero says no hardware reset flag was set, which usually means the
+// chip jumped to address zero in software rather than being reset. It does not on
+// its own clear the supply of suspicion: if the brown-out detector fuse is off, a
+// dip simply makes the CPU execute nonsense, and one common outcome is exactly
+// that jump, with no flag set.
+//
+// So two things are tracked across restarts, in .noinit so they survive a jump to
+// zero but not a real loss of power:
+//   - a canary proving RAM was never lost, which rules the supply out directly
+//   - the lowest supply voltage seen, measured by the chip itself
+//
+// Vcc is read by measuring the internal 1.1 V bandgap against AVcc. The reference
+// is only accurate to about 10 percent, so the absolute number is rough; what
+// matters is whether it dips, and by how much.
+
+#define RAM_CANARY 0xBA1DCA7Ful
+
+static uint32_t ramCanary  __attribute__((section(".noinit")));
+static uint16_t bootCount  __attribute__((section(".noinit")));
+static uint16_t minVccMv   __attribute__((section(".noinit")));
+
+static uint16_t readVccMv(void) {
+  // 1.1 V bandgap as the input, AVcc as the reference.
+  ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+  delayMicroseconds(300);          // the reference needs time to settle
+  ADCSRA |= _BV(ADSC);
+  while (ADCSRA & _BV(ADSC)) { }
+  uint16_t adc = ADC;
+  if (adc == 0) return 0;
+  return (uint16_t)(1125300UL / adc);   // 1.1 V * 1023 * 1000
+}
 
 // ---------------------------------------------------------------------------
 
@@ -59,22 +117,51 @@ static uint8_t  headerPos = 0;
 static uint8_t  header[6];
 static uint32_t lastFrameMs = 0;
 static bool     everReceived = false;
+static uint32_t lastVccSampleMs = 0;
+static uint32_t lastDiagMs = 0;
 
 void setup() {
-#if USE_WATCHDOG
-  // Disable first: if we arrived here via a watchdog reset, the timer is still
-  // armed with whatever interval tripped it.
-  wdt_disable();
-#endif
-
   FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS);
   FastLED.clear(true);
 
   Serial.begin(BAUD_RATE);
 
-  // Announce ourselves so a host can identify the board without guessing. The
-  // BaldLight host ignores this; it is here for manual probing with a terminal.
+  // Announce ourselves so a host can identify the board without guessing.
   Serial.print(F("Ada\n"));
+
+  // Then say why we just started. The host logs this, which turns "it rebooted
+  // again" into an actual cause instead of a guess.
+  Serial.print(F("rst="));
+  if (resetFlags & _BV(WDRF))  Serial.print(F("WDT "));
+  if (resetFlags & _BV(BORF))  Serial.print(F("BROWNOUT "));
+  if (resetFlags & _BV(EXTRF)) Serial.print(F("EXTERNAL "));
+  if (resetFlags & _BV(PORF))  Serial.print(F("POWERON "));
+  if (resetFlags == 0)         Serial.print(F("UNKNOWN "));
+  Serial.print(F("raw:"));
+  Serial.println(resetFlags, HEX);
+
+  // Did RAM survive? If the canary is intact the supply never actually went away,
+  // whatever else happened. If it is gone, power was lost and everything else in
+  // .noinit is meaningless, so start the counters again.
+  bool ramSurvived = (ramCanary == RAM_CANARY);
+  if (!ramSurvived) {
+    ramCanary = RAM_CANARY;
+    bootCount = 0;
+    minVccMv = 0xFFFF;
+  }
+  bootCount++;
+
+  uint16_t vcc = readVccMv();
+  if (vcc > 0 && vcc < minVccMv) minVccMv = vcc;
+
+  Serial.print(F("diag ram="));
+  Serial.print(ramSurvived ? F("KEPT") : F("LOST"));
+  Serial.print(F(" boot="));
+  Serial.print(bootCount);
+  Serial.print(F(" vcc="));
+  Serial.print(vcc);
+  Serial.print(F(" vmin="));
+  Serial.println(minVccMv);
 
   lastFrameMs = millis();
 
@@ -90,6 +177,27 @@ void loop() {
 
   if (waitForHeader()) {
     readFrame();
+  }
+
+  // Sample the supply between frames. This will not catch a microsecond spike, but
+  // any dip that lasts long enough to upset the CPU is far longer than that.
+  uint32_t now = millis();
+  if (now - lastVccSampleMs >= 20) {
+    lastVccSampleMs = now;
+    uint16_t vcc = readVccMv();
+    if (vcc > 0 && vcc < minVccMv) minVccMv = vcc;
+  }
+
+  // A periodic line so the supply can be watched live against what is on screen,
+  // instead of only being seen after a restart.
+  if (now - lastDiagMs >= 5000) {
+    lastDiagMs = now;
+    Serial.print(F("diag ram=KEPT boot="));
+    Serial.print(bootCount);
+    Serial.print(F(" vcc="));
+    Serial.print(readVccMv());
+    Serial.print(F(" vmin="));
+    Serial.println(minVccMv);
   }
 
 #if HOLD_LAST_FRAME == 0

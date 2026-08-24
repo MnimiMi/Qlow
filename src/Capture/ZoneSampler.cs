@@ -1,4 +1,4 @@
-namespace BaldLight.Capture;
+namespace Qlow.Capture;
 
 /// <summary>Linear RGB triplet in 0..255, kept as doubles so smoothing does not quantise.</summary>
 public struct Rgb

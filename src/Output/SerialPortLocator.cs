@@ -2,7 +2,7 @@ using System.IO.Ports;
 using System.Text.RegularExpressions;
 using Microsoft.Win32;
 
-namespace BaldLight.Output;
+namespace Qlow.Output;
 
 /// <summary>One USB serial port as Windows currently sees it.</summary>
 public readonly record struct UsbSerialPort(string PortName, string Vid, string Pid)
@@ -14,8 +14,7 @@ public readonly record struct UsbSerialPort(string PortName, string Vid, string 
 /// <summary>
 /// Finds the controller by USB vendor and product id instead of trusting a
 /// hard-coded COM name. Windows renumbers adapters after a hub change or a driver
-/// update, and a pinned "COM6" is one of the ways Prismatik ends up talking to
-/// nothing.
+/// update, after which a pinned "COM6" points at nothing at all.
 ///
 /// Walking the USB enum tree rather than SerialPort.GetPortNames also means the
 /// motherboard's own COM1 is never mistaken for the controller.

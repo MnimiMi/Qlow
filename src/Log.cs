@@ -1,13 +1,13 @@
 using System.Text;
 
-namespace BaldLight;
+namespace Qlow;
 
 public enum LogLevel { Debug, Info, Warn, Error }
 
 /// <summary>
-/// Tiny always-on logger. Prismatik's biggest diagnostic problem is that when it
-/// dies you have nothing to look at, so this writes unconditionally, rotates by
-/// size, and never throws out of a log call.
+/// Tiny always-on logger. An intermittent fault is worth very little without a
+/// record of when it happened, so this writes unconditionally, rotates by size,
+/// and never throws out of a log call.
 /// </summary>
 public static class Log
 {
@@ -19,9 +19,9 @@ public static class Log
     public static LogLevel MinLevel { get; set; } = LogLevel.Info;
 
     public static string Directory { get; } =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BaldLight", "logs");
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Qlow", "logs");
 
-    public static string FilePath { get; } = Path.Combine(Directory, "baldlight.log");
+    public static string FilePath { get; } = Path.Combine(Directory, "qlow.log");
 
     public static event Action<string>? LineWritten;
 

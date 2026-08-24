@@ -1,4 +1,4 @@
-# BaldLight — setting it up on your own build
+# Qlow — setting it up on your own build
 
 You need: a Windows 10/11 machine, a microcontroller on USB running an Adalight
 sketch, and an addressable strip around the screen. Nothing else — the `.exe` has
@@ -11,21 +11,48 @@ you have, or which corner the strip starts at. All of that is configuration.
 
 ## 1. Run it
 
-Double-click `BaldLight.exe`. An icon appears in the tray. That is the whole app —
+Double-click `Qlow.exe`. An icon appears in the tray. That is the whole app —
 there is no main window, on purpose. Everything is a JSON file and a log.
 
-Two files get created in `%APPDATA%\BaldLight`:
+Two files get created in `%APPDATA%\Qlow`:
 
 - `config.json` — every setting
 - `layout.json` — one sampling rectangle per LED, in strip order
 
-The log is at `%LOCALAPPDATA%\BaldLight\logs\baldlight.log`. **Read it first when
+The log is at `%LOCALAPPDATA%\Qlow\logs\qlow.log`. **Read it first when
 anything misbehaves.** Every reconnect, every capture rebuild and every reason for
 both is in there.
 
-If you already use Prismatik, BaldLight reads its profile on first run and imports
-your LED layout, so you do not have to map anything again. Close Prismatik first —
-two apps cannot own the same COM port.
+### Coming from another ambilight app
+
+If you have already mapped your strip somewhere else, import that mapping rather
+than redoing it. Whatever you had also has to be **closed first** — two apps cannot
+own the same COM port.
+
+**Prismatik.** Detected automatically on first run: Qlow reads
+`%USERPROFILE%\Prismatik\main.conf`, follows it to the active profile under
+`Prismatik\Profiles`, and converts the zones. Tray menu →
+**Import layout → From Prismatik (auto-detect)** re-runs it at any time.
+
+**Hyperion, Hyperion.ng or HyperHDR.** Tray menu →
+**Import layout → From file...** and point it at the config. Both layout shapes are
+read: the classic `hscan`/`vscan` objects and the flat `hmin`/`hmax`/`vmin`/`vmax`
+used by Hyperion.ng and HyperHDR. Their coordinates are already fractions of the
+screen, so the mapping transfers exactly.
+
+Note that Hyperion.ng 2.x keeps its settings in a SQLite database rather than a
+JSON file — export a config from its web UI first, or paste the LED layout into a
+`.json` of its own. A file that is nothing but the `leds` array works too.
+
+There is a headless equivalent, useful for scripting a setup:
+
+```bash
+Qlow.exe --import "C:\path\to\hyperion_config.json"
+```
+
+Either way the result lands in `layout.json`, and `layout.reverse` / `layout.rotate`
+still apply on top — so if the imported strip runs the wrong way, you fix it there
+rather than re-importing.
 
 ---
 
@@ -38,8 +65,8 @@ Serial open on COM7 at 115200 baud
 ```
 
 If instead you see `No matching USB serial device is present`, run
-`BaldLight.exe --selftest` from a terminal and open
-`%LOCALAPPDATA%\BaldLight\selftest.txt`. It lists every USB serial port Windows
+`Qlow.exe --selftest` from a terminal and open
+`%LOCALAPPDATA%\Qlow\selftest.txt`. It lists every USB serial port Windows
 can see, with its ids:
 
 ```
@@ -63,7 +90,7 @@ loop around the screen, and count the LEDs on each run:
 
 ```jsonc
 "layout": {
-  "source": "auto",     // "generated" ignores any Prismatik profile
+  "source": "auto",     // "generated" skips Prismatik auto-detect and always builds from these numbers
   "bottomLeft": 10,     // from the seam leftwards to the bottom-left corner
   "left": 22,           // up the left edge
   "top": 38,            // across the top, left to right
@@ -146,7 +173,7 @@ Both of these cause a strip that works fine and then goes dark for no reason.
 
 **USB selective suspend.** Windows powers down the USB serial adapter. On an
 Arduino Nano, DTR is capacitively coupled to RESET, so any port bounce reboots
-the board. BaldLight holds DTR and RTS de-asserted so it never causes this itself,
+the board. Qlow holds DTR and RTS de-asserted so it never causes this itself,
 but the power manager still can. In an admin terminal:
 
 ```bash
@@ -174,7 +201,7 @@ included firmware with a higher `BAUD_RATE` and match `serial.baudRate`.
 
 ## 7. Firmware (optional)
 
-`firmware/BaldLight_Adalight` is Adalight-compatible, so BaldLight works with
+`firmware/Qlow_Adalight` is Adalight-compatible, so Qlow works with
 whatever sketch you already have. Flashing this one buys three things:
 
 - **Silence holds the last frame** instead of blanking the strip. The stock
@@ -202,7 +229,7 @@ like a dead board and needs an ISP programmer to recover.
 | Reconnect now | Rebuild capture and re-find the device |
 | Test patterns | Chase, colour order, side counts |
 | Edit config | Opens `config.json` |
-| Re-import layout from Prismatik | Re-reads a Prismatik profile |
+| Import layout | From a detected Prismatik profile, or from a Hyperion / HyperHDR file you pick |
 | Reload config and layout | Apply changes without restarting |
 | Open log | The first place to look |
 | Run at startup | An `HKCU\...\Run` entry, no elevation needed |

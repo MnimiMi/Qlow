@@ -1,10 +1,10 @@
 using System.Diagnostics;
 using System.Text;
-using BaldLight.Capture;
-using BaldLight.Output;
-using BaldLight.Processing;
+using Qlow.Capture;
+using Qlow.Output;
+using Qlow.Processing;
 
-namespace BaldLight;
+namespace Qlow;
 
 /// <summary>
 /// Exercises capture, layout and colour processing without ever opening the
@@ -16,7 +16,7 @@ public static class SelfTest
 {
     public static string ReportPath { get; } =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "BaldLight", "selftest.txt");
+            "Qlow", "selftest.txt");
 
     public static void Run()
     {
@@ -27,7 +27,7 @@ public static class SelfTest
             Log.Info("selftest: " + line);
         }
 
-        Say($"BaldLight self test, {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        Say($"Qlow self test, {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
         Say("");
 
         var config = AppConfig.Load();
@@ -75,7 +75,7 @@ public static class SelfTest
 
         while (clock.Elapsed.TotalSeconds < 3)
         {
-            var frame = duplicator.TryGrab(50);
+            var frame = duplicator.TryGrab(50, out _);
             if (frame == null)
             {
                 nulls++;

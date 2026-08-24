@@ -12,9 +12,10 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>false</SelfContained>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>BaldLight</RootNamespace>
-    <AssemblyName>BaldLight</AssemblyName>
+    <RootNamespace>Qlow</RootNamespace>
+    <AssemblyName>Qlow</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>assets\qlow.ico</ApplicationIcon>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <InvariantGlobalization>true</InvariantGlobalization>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
@@ -24,6 +25,12 @@
   <ItemGroup>
     <PackageReference Include="Vortice.Direct3D11" Version="3.6.2" />
     <PackageReference Include="System.IO.Ports" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Embedded as well as set as the application icon, so the tray can load it
+         from inside the single-file publish rather than from a file on disk. -->
+    <EmbeddedResource Include="assets\qlow.ico" />
   </ItemGroup>
 
 </Project>
