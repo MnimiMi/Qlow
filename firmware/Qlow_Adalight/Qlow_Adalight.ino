@@ -103,6 +103,40 @@ static uint32_t ramCanary  __attribute__((section(".noinit")));
 static uint16_t bootCount  __attribute__((section(".noinit")));
 static uint16_t minVccMv   __attribute__((section(".noinit")));
 
+// ---------------------------------------------------------------------------
+// Why did it restart, when the hardware says no reset happened
+// ---------------------------------------------------------------------------
+//
+// MCUSR reading zero means the chip was never reset; it simply began executing
+// from address zero again. Two things usually do that on an AVR.
+//
+// The first is an interrupt with no handler. avr-libc points every unused vector
+// at a stub that jumps to zero, which looks exactly like a restart. Defining
+// BADISR_vect replaces that stub, so the event can be recorded before the jump.
+//
+// The second is the stack growing down into the variables and corrupting a return
+// address. That is measured instead: the gap between the stack pointer and the
+// top of allocated memory is sampled continuously, and the smallest gap survives
+// a restart. A number approaching zero is the answer.
+
+#define BADISR_MARK 0xA7
+
+static uint8_t  badIsrMark  __attribute__((section(".noinit")));
+static uint16_t minFreeRam  __attribute__((section(".noinit")));
+
+ISR(BADISR_vect) {
+  badIsrMark = BADISR_MARK;
+  // Restart the same way the default stub would have, now that it is on record.
+  asm volatile ("jmp 0");
+}
+
+static uint16_t freeRam(void) {
+  extern int __heap_start;
+  extern int *__brkval;
+  int here;
+  return (uint16_t)((int)&here - (__brkval == 0 ? (int)&__heap_start : (int)__brkval));
+}
+
 static uint16_t readVccMv(void) {
   // 1.1 V bandgap as the input, AVcc as the reference.
   ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
@@ -158,11 +192,21 @@ void setup() {
     ramCanary = RAM_CANARY;
     bootCount = 0;
     minVccMv = 0xFFFF;
+    minFreeRam = 0xFFFF;
+    badIsrMark = 0;
   }
   bootCount++;
 
+  // Only trustworthy if RAM survived; on a cold boot the byte is whatever was
+  // left in the cell.
+  bool fromBadIsr = ramSurvived && (badIsrMark == BADISR_MARK);
+  badIsrMark = 0;
+
   uint16_t vcc = readVccMv();
   if (vcc > 0 && vcc < minVccMv) minVccMv = vcc;
+
+  uint16_t freeNow = freeRam();
+  if (freeNow < minFreeRam) minFreeRam = freeNow;
 
   Serial.print(F("diag ram="));
   Serial.print(ramSurvived ? F("KEPT") : F("LOST"));
@@ -171,7 +215,11 @@ void setup() {
   Serial.print(F(" vcc="));
   Serial.print(vcc);
   Serial.print(F(" vmin="));
-  Serial.println(minVccMv);
+  Serial.print(minVccMv);
+  Serial.print(F(" freemin="));
+  Serial.print(minFreeRam);
+  Serial.print(F(" badisr="));
+  Serial.println(fromBadIsr ? 1 : 0);
 
   lastFrameMs = millis();
 
@@ -196,6 +244,11 @@ void loop() {
     lastVccSampleMs = now;
     uint16_t vcc = readVccMv();
     if (vcc > 0 && vcc < minVccMv) minVccMv = vcc;
+
+    // Sampled here rather than only at startup: the stack is at its deepest
+    // during a frame, not while setting up.
+    uint16_t freeNow = freeRam();
+    if (freeNow < minFreeRam) minFreeRam = freeNow;
   }
 
   // A periodic line so the supply can be watched live against what is on screen,
@@ -207,7 +260,9 @@ void loop() {
     Serial.print(F(" vcc="));
     Serial.print(readVccMv());
     Serial.print(F(" vmin="));
-    Serial.println(minVccMv);
+    Serial.print(minVccMv);
+    Serial.print(F(" freemin="));
+    Serial.println(minFreeRam);
   }
 
   // The host has gone quiet for longer than a restart would explain. Fade out, so

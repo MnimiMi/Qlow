@@ -387,6 +387,25 @@ public sealed class AdalightLink : IDisposable
         {
             LastDiagnostics = line[5..].Trim();
 
+            // The controller caught an interrupt with no handler. That is a restart
+            // with a named cause rather than a mystery, so it must not be lost in
+            // the routine telemetry.
+            if (System.Text.RegularExpressions.Regex.IsMatch(line, @"badisr=[1-9]"))
+            {
+                Log.Warn($"Controller restarted from an unhandled interrupt -- {line}");
+                return;
+            }
+
+            // Free bytes between the stack and the variables, at its lowest. Close to
+            // zero means the stack has been running into them, which corrupts return
+            // addresses and sends the chip back to address zero.
+            var free = System.Text.RegularExpressions.Regex.Match(line, @"freemin=(\d+)");
+            if (free.Success && int.TryParse(free.Groups[1].Value, out var bytes) && bytes is > 0 and < 200)
+            {
+                Log.Warn($"Controller is down to {bytes} bytes of free RAM -- {line}");
+                return;
+            }
+
             var vmin = System.Text.RegularExpressions.Regex.Match(line, @"vmin=(\d+)");
             if (vmin.Success && int.TryParse(vmin.Groups[1].Value, out var mv) && mv is > 0 and < 4400)
                 Log.Warn($"Controller supply dipped to {mv} mV -- {line}");
