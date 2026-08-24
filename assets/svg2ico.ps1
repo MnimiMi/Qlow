@@ -97,7 +97,7 @@ function Write-Ico($bitmaps, $outPath) {
   $bw.Flush(); $bw.Dispose(); $fs.Dispose()
 }
 
-$scratch = 'C:\Users\MNIMIP~1\AppData\Local\Temp\claude\G--baldcat-website\a0a6ac25-c6b9-40ed-9688-7bd481163913\scratchpad'
+$scratch = $PSScriptRoot
 
 $rose = @(255, 80, 140)
 

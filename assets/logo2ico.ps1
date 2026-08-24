@@ -1,7 +1,7 @@
 Add-Type -AssemblyName System.Drawing
 
-$srcPath = 'C:\Users\Mnimi PC\Desktop\34343434.png'
-$scratch = 'C:\Users\MNIMIP~1\AppData\Local\Temp\claude\G--baldcat-website\a0a6ac25-c6b9-40ed-9688-7bd481163913\scratchpad'
+$srcPath = Join-Path $PSScriptRoot 'logo-source.png'
+$scratch = $PSScriptRoot
 $pink = @(255, 80, 140)
 
 $src = New-Object System.Drawing.Bitmap $srcPath
