@@ -20,44 +20,43 @@
 
 ## Why
 
-Ambilight software has a habit of working perfectly until it doesn't. The strip
-goes dark, the app still sits in the tray looking healthy, and only a restart
-brings it back. It is almost always one of a small set of causes, and each one has
-a fix that belongs in the driver rather than in the user's habits.
+Ambilight software has a habit of working perfectly until it doesn't. The strip goes dark, the app still sits in the tray looking healthy, and only a restart brings it back. Qlow's answer is: never trust the last known state, always re-derive it.
 
 | Failure | What Qlow does about it |
 |---|---|
-| Windows renumbers the USB adapter | Finds the board by USB vendor and product id on every connect, never by a remembered COM name |
+| Windows renumbers the USB adapter | Finds the board by USB vendor/product id, never a remembered COM name |
+| Opening the port reboots the board | Holds DTR/RTS de-asserted — on a Nano, DTR is wired straight to RESET |
+| Screen capture silently stalls | A watchdog rebuilds it; duplication loss is treated as routine, not an error |
+| Firmware blanks on a quiet link | Resends the last frame on a heartbeat |
+| The board resets and nobody notices | Watches for the boot greeting, logs every reset with its timing |
+
+<details>
+<summary>Full failure list</summary>
+
+| Failure | What Qlow does about it |
+|---|---|
 | A write fails and the handle is left open | Any write error closes the port and re-locates the device, with backoff, forever |
-| Opening the port reboots the board | Holds DTR and RTS de-asserted — on an Arduino Nano, DTR is capacitively coupled to RESET |
-| Screen capture is lost | Treats duplication loss as routine and rebuilds unconditionally; a watchdog covers stalls that never report themselves |
 | Sleep, lock screen, resolution change | Each event forces a full re-init of both capture and serial |
-| Firmware blanks on a quiet link | Resends the last frame on a heartbeat, so a static screen never looks like a dead host |
 | Resolution changes break the mapping | Stores the layout in normalised coordinates rather than absolute pixels |
-| The board resets and nobody notices | Watches the return channel for the boot greeting and logs every reset with its timing |
+
+</details>
 
 ---
 
 ## Features
 
-- **Zone capture via DXGI Desktop Duplication** — the desktop is copied into a
-  mipped texture on the GPU and only a small mip is read back, so a 2560×1440
-  screen costs a 320×180 readback instead of 14 MB per frame
-- **Configurable strip geometry** — per-side LED counts, sampling depth, direction
-  and start offset, all in JSON
-- **Colour pipeline** — vibrance, white balance, temporal smoothing, gamma, a noise
-  floor, and a current limiter that scales the whole frame uniformly so hues survive
-- **Test patterns** for working out orientation and channel order on a strip you did
-  not wire yourself
+- **Zone capture via DXGI Desktop Duplication** — the desktop is copied into a mipped texture on the GPU and only a small mip is read back, so a 2560×1440 screen costs a 320×180 readback instead of 14 MB per frame
+- **Configurable strip geometry** — per-side LED counts, sampling depth, direction and start offset, all in JSON
+- **Colour pipeline** — vibrance, white balance, temporal smoothing, gamma, a noise floor, and a current limiter that scales the whole frame uniformly so hues survive
+- **Test patterns** for working out orientation and channel order on a strip you did not wire yourself
 - **Self-test mode** that exercises capture without opening the serial port
-- **Always-on logging** with a health line every minute
-- Tray toggle, autostart, hot config reload — no restart for anything
+- Always-on logging with a health line every minute, tray toggle, autostart, hot config reload
 
 ---
 
 ## Hardware
 
-Anything that speaks Adalight over a serial port will do. The reference build:
+Anything that speaks Adalight over serial will do. The reference build:
 
 | Part | Used here |
 |---|---|
@@ -67,28 +66,18 @@ Anything that speaks Adalight over a serial port will do. The reference build:
 | Power | Strip on its own 5 V supply, grounds tied to the board |
 | Display | 2560×1440 |
 
-Other boards, other LED counts and other USB bridges are all configuration, not
-code. Discovery covers CH340/CH341/CH9102, CP2102, FTDI, Arduino Uno and Leonardo,
-SparkFun and native ESP32 USB — and if none of those match but the machine has
-exactly one USB serial port, that port is used anyway.
+Discovery covers CH340/CH341/CH9102, CP2102, FTDI, Arduino Uno and Leonardo, SparkFun and native ESP32 USB — and if none of those match but the machine has exactly one USB serial port, that port is used anyway.
 
-> **Wiring note.** Do not feed 5 V into the board's `5V` pin while USB is also
-> connected. That puts two supplies in parallel on one rail, and when it sags the
-> MCU resets while the USB bridge keeps the COM port open — so the strip flashes
-> its startup pattern and the host sees nothing wrong. Power the board from USB,
-> the strip from its own supply, and tie the grounds. A 330–470 Ω resistor in the
-> data line and 1000 µF across the strip's supply are both worth adding.
+> **Wiring note.** Don't feed 5 V into the board's `5V` pin while USB is also connected — two supplies in parallel on one rail, and when it sags the MCU resets while the USB bridge keeps the COM port open, so the strip flashes its startup pattern and the host sees nothing wrong. Power the board from USB, the strip from its own supply, tie the grounds. A 330–470 Ω resistor in the data line and 1000 µF across the strip's supply are both worth adding.
 
 ---
 
 ## Setup
 
-1. Run `Qlow.exe`. An icon appears in the tray — that is the whole UI.
+1. Run `Qlow.exe`. An icon appears in the tray — that's the whole UI.
 2. Open the log and confirm a line like `Serial open on COM7 at 115200 baud`.
 3. Set your per-side LED counts in `config.json`, then **Reload config and layout**.
 4. Use the test patterns to sort out direction and colour order.
-
-Files land in:
 
 | Path | What |
 |---|---|
@@ -99,6 +88,9 @@ Files land in:
 ---
 
 ## Configuration
+
+<details>
+<summary>Full <code>config.json</code> reference</summary>
 
 ```jsonc
 {
@@ -158,86 +150,39 @@ Files land in:
 }
 ```
 
-`reverse` and `rotate` are applied on every load, so they can be changed and
-reloaded without regenerating `layout.json`. Changing the per-side counts needs
-the file deleted first.
+`reverse` and `rotate` are applied on every load, so they can be changed and reloaded without regenerating `layout.json`. Changing the per-side counts needs the file deleted first.
 
-### Frame rate ceiling
+</details>
 
-A frame is `6 + leds × 3` bytes and serial costs 10 bits per byte:
+**Frame rate ceiling.** A frame is `6 + leds × 3` bytes, serial costs 10 bits/byte — at 120 LEDs that's ~31 fps at 115200 baud, ~136 fps at 500000. No value of `targetFps` beats this; to go faster, flash the bundled firmware with a higher `BAUD_RATE` and match `serial.baudRate` on both sides.
 
-| Baud | Bytes/s | Max fps at 120 LEDs |
-|---|---|---|
-| 115200 | 11 520 | ~31 |
-| 500000 | 50 000 | ~136 |
+**Ambient floor.** `minLuminance` is a noise gate — below it, a zone is forced black. `minBrightness` is a floor — nothing sits below it, so a black screen glows instead of going dark. A zone with real colour scales up and keeps its hue; a genuinely black zone takes `darkColor` instead (`#FFFFFF` for neutral white, `#FF8000` for warm).
 
-No value of `targetFps` beats this. To go faster, flash the bundled firmware with a
-higher `BAUD_RATE` and match `serial.baudRate` — both sides must agree.
-
-### Ambient floor on a dark screen
-
-`minLuminance` and `minBrightness` are opposite ends of the same range and work
-together:
-
-| Setting | Does |
-|---|---|
-| `minLuminance` | A noise gate. Anything below it is forced to black, so a nearly-dark zone does not shimmer on sensor noise |
-| `minBrightness` | A floor. Nothing is allowed to sit below it, so the strip keeps a low glow instead of going out |
-
-Set `minBrightness` to `10` and a black screen leaves the strip at 10% rather than
-dark. It is applied per zone, so a fully black screen is just the case where every
-zone hits the floor at once — a dark corner of a bright scene gets the same
-treatment.
-
-A zone that still has colour is scaled up and keeps its hue. A zone that is
-genuinely black has no hue to keep, so it takes `darkColor`, normalised so the
-result lands exactly on the floor. `#FFFFFF` gives neutral white; something like
-`#FF8000` gives a warm glow instead.
-
-### Current limiting
-
-`powerSupplyAmps` defaults to `0`, meaning no limit, which is right when the supply
-is sized properly. Set it to the real rating to enforce headroom: the whole frame is
-then scaled uniformly, preserving hue, rather than clipped per LED. 120 WS2812B at
-full white want roughly 6 A, so a low limit will be dimming most of the time.
+**Current limiting.** `powerSupplyAmps` defaults to `0` (no limit) — set it to the real rating and the whole frame scales down uniformly, preserving hue, rather than clipping per LED. 120 WS2812B at full white want roughly 6 A.
 
 ---
 
 ## Test Patterns
 
-Tray menu → **Test patterns**. Orientation is guesswork on a strip you did not wire,
-so these answer it directly.
+Tray menu → **Test patterns**. Orientation is guesswork on a strip you didn't wire, so these answer it directly.
 
 | Pattern | Answers |
 |---|---|
-| **Chase** — one dot walks the strip | Which physical LED is number 1, and which way it runs → `layout.reverse`, `layout.rotate` |
+| **Chase** — one dot walks the strip | Which physical LED is number 1, which way it runs → `layout.reverse`, `layout.rotate` |
 | **Red, green, blue** — whole strip in turn | Whether the channel order is right → `serial.colorOrder` |
 | **Sides** — each run in its own colour | Whether the per-side counts match the strip |
 
-Solid patterns run at a quarter brightness on purpose: flooding a whole strip at
-full white on an underspecified supply is a good way to brown the board out
-mid-test.
+Solid patterns run at a quarter brightness on purpose — flooding a whole strip at full white on an underspecified supply is a good way to brown the board out mid-test.
 
 ---
 
 ## Firmware
 
-`firmware/Qlow_Adalight` speaks the Adalight framing, so the host works with any
-stock Adalight sketch. Flashing this one adds three things:
+`firmware/Qlow_Adalight` speaks standard Adalight framing, so the host works with any stock Adalight sketch too. Flashing this one adds: last-frame hold on silence (a brief hiccup doesn't read as a hardware fault), byte-by-byte header resync (a truncated write costs one frame, not a desync), and a baud rate you can raise.
 
-- **Silence holds the last frame** instead of blanking the strip, so a brief hiccup
-  on the PC does not read as a hardware fault
-- **The header parser resynchronises byte by byte**, so a truncated write costs one
-  frame instead of desyncing the stream
-- **The baud rate is a constant you can raise**
+Set `NUM_LEDS`, `DATA_PIN`, `LED_TYPE` and `COLOR_ORDER` before flashing. Requires FastLED.
 
-Set `NUM_LEDS`, `DATA_PIN`, `LED_TYPE` and `COLOR_ORDER` at the top before flashing.
-Requires the FastLED library.
-
-`USE_WATCHDOG` is off by default. It is worth enabling, but **only on a board with
-the Optiboot bootloader** — every current Nano and Uno has it. On the older
-pre-Optiboot bootloader a watchdog reset causes a boot loop that looks exactly like
-a dead board and needs an ISP programmer to recover.
+`USE_WATCHDOG` is off by default — worth enabling, but **only on an Optiboot board** (every current Nano/Uno qualifies). On the older pre-Optiboot bootloader a watchdog reset causes a boot loop that looks exactly like a dead board and needs an ISP programmer to recover.
 
 ---
 
@@ -247,23 +192,22 @@ a dead board and needs an ISP programmer to recover.
 Qlow.exe --selftest
 ```
 
-Exercises capture, layout and colour processing **without opening the serial port**,
-so it can run while something else still owns the device. Writes
-`%LOCALAPPDATA%\Qlow\selftest.txt` with the resolved port, every USB serial port
-on the machine, the capture resolution and rate, the serial frame-rate ceiling and
-sampled LED values.
+Exercises capture, layout and colour processing **without opening the serial port**, so it can run while something else still owns the device. Writes `%LOCALAPPDATA%\Qlow\selftest.txt` with the resolved port, every USB serial port on the machine, capture resolution/rate, the frame-rate ceiling and sampled LED values.
 
-The log answers most of the rest:
+<details>
+<summary>Reading the log</summary>
 
 | Line | Meaning |
 |---|---|
 | `Serial write failed on COM7` → `Closing COM7` | The board went away; the following lines show it reconnecting |
-| `AcquireNextFrame failed: ... (desktop switch, fullscreen transition or mode change)` | Normal, rebuilds itself |
-| `No frame for 3000 ms, forcing capture rebuild` | The watchdog caught a stall that did not report itself |
+| `AcquireNextFrame failed: ...` | Normal — desktop switch, fullscreen transition, or mode change; rebuilds itself |
+| `No frame for 3000 ms, forcing capture rebuild` | The watchdog caught a stall that didn't report itself |
 | `Controller rebooted (137.4s since the last one, 3 total)` | The board reset on its own while the link stayed up — brownout, a loose lead, or a watchdog in the sketch |
 | `Health: 30.0 fps captured, 54000 frames sent on COM7, 0 controller reboots` | Written every minute |
 
 Set `"logLevel": "Debug"` for more.
+
+</details>
 
 ---
 
@@ -291,7 +235,8 @@ dotnet build Qlow.csproj -c Release
 
 Output in `bin\Release\net8.0-windows\win-x64\Qlow.exe`.
 
-For something that runs on a machine with no .NET installed:
+<details>
+<summary>Self-contained build (no .NET required on the target machine)</summary>
 
 ```bash
 dotnet publish Qlow.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none -o dist/Qlow
@@ -299,9 +244,10 @@ dotnet publish Qlow.csproj -c Release -r win-x64 --self-contained true -p:Publis
 
 One 66 MB `.exe` with the runtime inside it, no dependencies.
 
+</details>
+
 ---
 
 ## License
 
-MIT. Third-party components: [Vortice.Windows](https://github.com/amerkoleci/Vortice.Windows) (MIT),
-`System.IO.Ports` (MIT), [FastLED](https://github.com/FastLED/FastLED) (MIT).
+MIT. Third-party components: [Vortice.Windows](https://github.com/amerkoleci/Vortice.Windows) (MIT), `System.IO.Ports` (MIT), [FastLED](https://github.com/FastLED/FastLED) (MIT).
