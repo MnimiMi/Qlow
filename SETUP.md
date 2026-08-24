@@ -230,9 +230,12 @@ included firmware with a higher `BAUD_RATE` and match `serial.baudRate`.
 `firmware/Qlow_Adalight` is Adalight-compatible, so Qlow works with
 whatever sketch you already have. Flashing this one buys three things:
 
-- **Silence holds the last frame** instead of blanking the strip. The stock
-  Adalight sketch treats a quiet link as "turn everything off", which turns any
-  brief hiccup on the PC into a strip that goes dark.
+- **Silence holds the last frame for eight seconds, then fades out.** The stock
+  Adalight sketch blanks the moment the link goes quiet, so any brief hiccup on
+  the PC shows as a strip that drops dead. Holding rides that out. Fading
+  afterwards matters just as much: the strip is the only status indicator this
+  system has, and a strip still glowing after the program has crashed or the
+  machine has rebooted is telling you something that is not true. Lit means live.
 - **The header parser resynchronises byte by byte**, so a truncated write costs
   one frame instead of desyncing the stream.
 - **The baud rate is a constant you can raise.**

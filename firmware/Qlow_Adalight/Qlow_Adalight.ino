@@ -31,11 +31,19 @@
 // rate of the panel.
 #define BAUD_RATE     115200
 
-// Hold the last frame forever when the host goes quiet (1), or fade out after
-// HOLD_TIMEOUT_MS (0). Holding is the safer default: a frozen picture is a much
-// clearer symptom than a dark strip, and it does not look like a hardware fault.
-#define HOLD_LAST_FRAME 1
-#define HOLD_TIMEOUT_MS 10000UL
+// What to do when the host stops sending.
+//
+// The strip is the only status indicator most of this system has, so it must not
+// lie. Holding the last frame indefinitely does exactly that: after a crash or a
+// reboot the strip keeps glowing, which reads as "everything is fine" when
+// nothing is running at all.
+//
+// So: hold briefly, long enough to ride out a restart or a hiccup without a
+// visible flicker, then fade out. Lit means live. The fade is gradual on purpose
+// — an abrupt cut looks like a power fault, a fade looks deliberate.
+#define HOLD_TIMEOUT_MS 8000UL   // silence tolerated before the fade begins
+#define FADE_STEP_MS    20UL     // how often the fade advances
+#define FADE_AMOUNT     12       // per step, out of 255; ~2.3 s to darkness
 
 // Hardware watchdog. Leave this at 0 unless the board has a modern bootloader.
 // Optiboot, which every current Nano and Uno ships with, clears the watchdog
@@ -119,6 +127,8 @@ static uint32_t lastFrameMs = 0;
 static bool     everReceived = false;
 static uint32_t lastVccSampleMs = 0;
 static uint32_t lastDiagMs = 0;
+static uint32_t lastFadeMs = 0;
+static uint16_t fadeSteps = 0;
 
 void setup() {
   FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS);
@@ -200,12 +210,23 @@ void loop() {
     Serial.println(minVccMv);
   }
 
-#if HOLD_LAST_FRAME == 0
-  if (everReceived && (millis() - lastFrameMs) > HOLD_TIMEOUT_MS) {
-    FastLED.clear(true);
-    everReceived = false;
+  // The host has gone quiet for longer than a restart would explain. Fade out, so
+  // a lit strip never outlives the program driving it.
+  if (everReceived && (now - lastFrameMs) > HOLD_TIMEOUT_MS) {
+    if (now - lastFadeMs >= FADE_STEP_MS) {
+      lastFadeMs = now;
+      fadeToBlackBy(leds, NUM_LEDS, FADE_AMOUNT);
+      FastLED.show();
+
+      // Each step scales what is already there, so the tail approaches zero
+      // without ever quite reaching it. Count the steps and finish the job.
+      if (++fadeSteps > 150) {
+        FastLED.clear(true);
+        everReceived = false;
+        fadeSteps = 0;
+      }
+    }
   }
-#endif
 }
 
 // Slides a six byte window along the stream until the magic word and a matching
@@ -287,4 +308,8 @@ static void readFrame() {
   FastLED.show();
   lastFrameMs = millis();
   everReceived = true;
+
+  // Data is flowing again, so any fade in progress is abandoned and the next one
+  // starts from a clean count.
+  fadeSteps = 0;
 }
