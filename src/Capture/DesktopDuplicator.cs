@@ -259,6 +259,12 @@ public sealed class DesktopDuplicator : IDisposable
         {
             _factory ??= DXGI.CreateDXGIFactory1<IDXGIFactory1>();
 
+            if (_factory == null)
+            {
+                Log.Warn("Could not create a DXGI factory");
+                return false;
+            }
+
             if (_factory.EnumAdapters1(0, out _adapter).Failure || _adapter == null)
             {
                 Log.Warn("No DXGI adapter available");
@@ -283,7 +289,21 @@ public sealed class DesktopDuplicator : IDisposable
             using (output)
             {
                 _output1 = output.QueryInterface<IDXGIOutput1>();
-                Description = $"{output.Description.DeviceName} on adapter {_adapter.Description1.Description.Trim()}";
+
+                if (_output1 == null)
+                {
+                    // Seen during a fullscreen transition, when the output is being
+                    // torn down underneath us.
+                    Log.Warn("Output does not expose IDXGIOutput1 right now");
+                    Teardown();
+                    return false;
+                }
+
+                // These descriptors are fixed-size buffers that come back empty while
+                // a mode change is in flight, so neither string can be trusted.
+                var monitor = output.Description.DeviceName ?? "unknown output";
+                var adapter = _adapter.Description1.Description ?? "unknown adapter";
+                Description = $"{monitor.Trim()} on adapter {adapter.Trim()}";
             }
 
             var featureLevels = new[] { FeatureLevel.Level_11_1, FeatureLevel.Level_11_0, FeatureLevel.Level_10_1 };
@@ -304,7 +324,15 @@ public sealed class DesktopDuplicator : IDisposable
                 return false;
             }
 
-            _duplication = _output1!.DuplicateOutput(_device);
+            _duplication = _output1.DuplicateOutput(_device);
+
+            if (_duplication == null)
+            {
+                Log.Warn("DuplicateOutput returned nothing");
+                Teardown();
+                return false;
+            }
+
             _sourceWidth = 0;
             _sourceHeight = 0;
 
@@ -374,8 +402,12 @@ public sealed class DesktopDuplicator : IDisposable
         if (r == Vortice.DXGI.ResultCode.DeviceRemoved) return "GPU removed or driver reset";
         if (r == Vortice.DXGI.ResultCode.DeviceReset) return "GPU reset";
         if (r == Vortice.DXGI.ResultCode.WaitTimeout) return "no new frame";
+        if (r == Vortice.DXGI.ResultCode.InvalidCall) return "duplication object is no longer usable, rebuild required";
+        if (r == Vortice.DXGI.ResultCode.NotCurrentlyAvailable) return "duplication unavailable, another client may hold it";
+        if (r == Vortice.DXGI.ResultCode.Unsupported) return "duplication unsupported for this output";
+        if (r == Vortice.DXGI.ResultCode.SessionDisconnected) return "session disconnected";
         if (r.Code == unchecked((int)0x80070005)) return "access denied, exclusive fullscreen or another duplication client";
-        return "unknown";
+        return $"unmapped code 0x{r.Code:X8}";
     }
 
     public void Dispose() => Teardown();

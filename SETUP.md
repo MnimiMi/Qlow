@@ -165,6 +165,32 @@ time.
 **Tie the grounds.** The strip supply's ground and the board's ground must be
 connected, or the data line has no reference and you get random colours.
 
+### Keeping a glow on a black screen
+
+By default a black screen means a dark strip. `color.minBrightness` sets a floor,
+as a percentage, below which no LED is allowed to fall:
+
+```jsonc
+"color": {
+  "minBrightness": 10,     // 0 disables the floor
+  "darkColor": "#FFFFFF"   // hue used where a zone has no colour of its own
+}
+```
+
+It is applied per zone, so a fully black screen is just the case where every zone
+hits the floor at once. A zone that still has some colour is scaled up and keeps
+its hue; one that is genuinely black takes `darkColor`, normalised to land exactly
+on the floor. `#FFFFFF` gives neutral white, something like `#FF8000` a warm glow.
+
+**This costs real current, continuously.** At 10% on 120 LEDs the strip draws
+roughly 0.6 A whenever it is on, where before it drew almost nothing on dark
+content. On a supply with little headroom that constant load is enough to change
+behaviour, so raise the floor and the supply together, not one without the other.
+
+Do not confuse it with `color.minLuminance`, which is the opposite end of the same
+range: a noise gate that forces anything dimmer than it to black, so a nearly-dark
+zone does not shimmer on sensor noise.
+
 ---
 
 ## 6. Two things worth fixing on the PC

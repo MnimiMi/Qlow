@@ -2,51 +2,77 @@ Add-Type -AssemblyName System.Drawing
 
 $srcPath = 'C:\Users\Mnimi PC\Desktop\34343434.png'
 $scratch = 'C:\Users\MNIMIP~1\AppData\Local\Temp\claude\G--baldcat-website\a0a6ac25-c6b9-40ed-9688-7bd481163913\scratchpad'
-
 $pink = @(255, 80, 140)
 
 $src = New-Object System.Drawing.Bitmap $srcPath
 $w = $src.Width; $h = $src.Height
 
-# Work on the actual artwork, not the empty margin around it.
-$minX = $w; $minY = $h; $maxX = -1; $maxY = -1
 $data = $src.LockBits((New-Object System.Drawing.Rectangle 0, 0, $w, $h),
   [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
   [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
 $stride = $data.Stride
 $bytes = New-Object byte[] ($stride * $h)
 [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $bytes, 0, $bytes.Length)
-$src.UnlockBits($data)
+$src.UnlockBits($data); $src.Dispose()
 
+$minX = $w; $minY = $h; $maxX = -1; $maxY = -1
 for ($y = 0; $y -lt $h; $y++) {
   $row = $y * $stride
   for ($x = 0; $x -lt $w; $x++) {
     if ($bytes[$row + $x * 4 + 3] -eq 0) { continue }
-    if ($x -lt $minX) { $minX = $x }
-    if ($x -gt $maxX) { $maxX = $x }
-    if ($y -lt $minY) { $minY = $y }
-    if ($y -gt $maxY) { $maxY = $y }
+    if ($x -lt $minX) { $minX = $x }; if ($x -gt $maxX) { $maxX = $x }
+    if ($y -lt $minY) { $minY = $y }; if ($y -gt $maxY) { $maxY = $y }
   }
 }
-"content bounds: X $minX..$maxX  Y $minY..$maxY  (canvas $w x $h)"
+$cw = $maxX - $minX + 1; $ch = $maxY - $minY + 1
 
-$cw = $maxX - $minX + 1
-$ch = $maxY - $minY + 1
+# Measure a wall in the source so the scale can be chosen to land it on whole pixels.
+$midY = [int](($minY + $maxY) / 2)
+$row = $midY * $stride
+$runs = @(); $in = $false; $start = 0
+for ($x = 0; $x -lt $w; $x++) {
+  $a = $bytes[$row + $x * 4 + 3]
+  if ($a -gt 128 -and -not $in) { $in = $true; $start = $x }
+  elseif ($a -le 128 -and $in) { $in = $false; $runs += ($x - $start) }
+}
+$wallSrc = ($runs | Measure-Object -Minimum).Minimum
+$wallRatio = $wallSrc / $cw
+"content $cw x $ch, wall $wallSrc px, ratio {0:F5}" -f $wallRatio
 
-# Flat pink everywhere, alpha untouched. Painting the fully transparent pixels too
-# means any later interpolation only ever blends alpha, never colour, so the edges
-# cannot pick up a pale fringe from the white that was hiding under them.
 $tinted = New-Object System.Drawing.Bitmap $cw, $ch, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
 for ($y = 0; $y -lt $ch; $y++) {
-  $row = ($y + $minY) * $stride
+  $r = ($y + $minY) * $stride
   for ($x = 0; $x -lt $cw; $x++) {
-    $a = $bytes[$row + ($x + $minX) * 4 + 3]
+    $a = $bytes[$r + ($x + $minX) * 4 + 3]
     $tinted.SetPixel($x, $y, [System.Drawing.Color]::FromArgb($a, $pink[0], $pink[1], $pink[2]))
   }
 }
-$src.Dispose()
 
-function Render([int]$size, [double]$pad) {
+# Pick a content width where the wall lands closest to a whole number of pixels and
+# the leftover margin splits evenly, so both edges sit on the same grid lines.
+function Pick-Fit([int]$size, [double]$maxPadFraction) {
+  # Walk from the largest usable size down and take the first fit that is good
+  # enough. Accuracy on the wall matters, but not at the cost of leaving the mark
+  # rattling around in half an empty frame, so the search prefers size and only
+  # requires the wall to land near a whole pixel.
+  $minContent = [int][Math]::Floor($size * 0.55)
+  $maxContent = [int][Math]::Floor($size * (1.0 - 2 * $maxPadFraction))
+  $fallback = $null
+
+  for ($c = $maxContent; $c -ge $minContent; $c--) {
+    if ((($size - $c) % 2) -ne 0) { continue }      # integer margin on both sides
+    $wall = $c * $wallRatio
+    if ($wall -lt 1.4) { continue }
+    $err = [Math]::Abs($wall - [Math]::Round($wall))
+    $cand = [pscustomobject]@{ Content = $c; Wall = $wall; Err = $err }
+    if ($err -le 0.12) { return $cand }
+    if ($null -eq $fallback -or $err -lt $fallback.Err) { $fallback = $cand }
+  }
+  return $fallback
+}
+
+function Render([int]$size) {
+  $fit = Pick-Fit $size 0.04
   $out = New-Object System.Drawing.Bitmap $size, $size, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
   $g = [System.Drawing.Graphics]::FromImage($out)
   $g.Clear([System.Drawing.Color]::Transparent)
@@ -54,21 +80,31 @@ function Render([int]$size, [double]$pad) {
   $g.PixelOffsetMode = 'HighQuality'
   $g.CompositingQuality = 'HighQuality'
 
-  $usable = $size * (1.0 - 2 * $pad)
-  $scale = [Math]::Min($usable / $cw, $usable / $ch)
-  $dw = $cw * $scale; $dh = $ch * $scale
-  $g.DrawImage($tinted, (($size - $dw) / 2.0), (($size - $dh) / 2.0), $dw, $dh)
+  $dw = $fit.Content
+  $dh = [int][Math]::Round($dw * $ch / $cw)
+  if ((($size - $dh) % 2) -ne 0) { $dh += 1 }
+  $g.DrawImage($tinted, [int](($size - $dw) / 2), [int](($size - $dh) / 2), $dw, $dh)
   $g.Dispose()
+  "  {0,2}px -> content {1}, wall {2:F2} (err {3:F2})" -f $size, $fit.Content, $fit.Wall, $fit.Err | Write-Host
   return $out
+}
+
+function Check-Symmetry($bmp) {
+  $y = [int]($bmp.Height * 0.45)
+  $runs = @(); $in = $false; $start = 0
+  for ($x = 0; $x -lt $bmp.Width; $x++) {
+    $a = $bmp.GetPixel($x, $y).A
+    if ($a -gt 100 -and -not $in) { $in = $true; $start = $x }
+    elseif ($a -le 100 -and $in) { $in = $false; $runs += ($x - $start) }
+  }
+  return ($runs -join '/')
 }
 
 function New-Dib($bmp) {
   $size = $bmp.Width
-  $ms = New-Object System.IO.MemoryStream
-  $bw = New-Object System.IO.BinaryWriter($ms)
+  $ms = New-Object System.IO.MemoryStream; $bw = New-Object System.IO.BinaryWriter($ms)
   $bw.Write([int]40); $bw.Write([int]$size); $bw.Write([int]($size * 2))
-  $bw.Write([int16]1); $bw.Write([int16]32)
-  $bw.Write([int]0); $bw.Write([int]0)
+  $bw.Write([int16]1); $bw.Write([int16]32); $bw.Write([int]0); $bw.Write([int]0)
   $bw.Write([int]0); $bw.Write([int]0); $bw.Write([int]0); $bw.Write([int]0)
   for ($y = $size - 1; $y -ge 0; $y--) {
     for ($x = 0; $x -lt $size; $x++) {
@@ -76,11 +112,9 @@ function New-Dib($bmp) {
       $bw.Write([byte]$c.B); $bw.Write([byte]$c.G); $bw.Write([byte]$c.R); $bw.Write([byte]$c.A)
     }
   }
-  $maskRow = [Math]::Ceiling($size / 8.0)
-  if ($maskRow % 4 -ne 0) { $maskRow += 4 - ($maskRow % 4) }
-  for ($y = 0; $y -lt $size; $y++) { $bw.Write((New-Object byte[] $maskRow)) }
-  $bw.Flush(); $b = $ms.ToArray(); $bw.Dispose(); $ms.Dispose()
-  return ,$b
+  $mr = [Math]::Ceiling($size / 8.0); if ($mr % 4 -ne 0) { $mr += 4 - ($mr % 4) }
+  for ($y = 0; $y -lt $size; $y++) { $bw.Write((New-Object byte[] $mr)) }
+  $bw.Flush(); $b = $ms.ToArray(); $bw.Dispose(); $ms.Dispose(); return ,$b
 }
 
 function Write-Ico($bitmaps, $outPath) {
@@ -93,31 +127,26 @@ function Write-Ico($bitmaps, $outPath) {
     $s = $bitmaps[$i].Width
     $bw.Write([byte]$s); $bw.Write([byte]$s); $bw.Write([byte]0); $bw.Write([byte]0)
     $bw.Write([int16]1); $bw.Write([int16]32)
-    $bw.Write([int]$dibs[$i].Length); $bw.Write([int]$offset)
-    $offset += $dibs[$i].Length
+    $bw.Write([int]$dibs[$i].Length); $bw.Write([int]$offset); $offset += $dibs[$i].Length
   }
   foreach ($d in $dibs) { $bw.Write($d) }
   $bw.Flush(); $bw.Dispose(); $fs.Dispose()
 }
 
 $sizes = @(16, 20, 24, 32, 48)
-$bmps = @(); foreach ($s in $sizes) { $bmps += (Render $s 0.05) }
-Write-Ico $bmps "$scratch\outglow.ico"
-"written outglow.ico: $($sizes -join ', ')"
+$bmps = @(); foreach ($s in $sizes) { $bmps += (Render $s) }
+'--- wall widths across the middle (should match left and right) ---'
+for ($i = 0; $i -lt $sizes.Count; $i++) { "  {0,2}px : {1}" -f $sizes[$i], (Check-Symmetry $bmps[$i]) }
 
-$sheet = New-Object System.Drawing.Bitmap (5 * 112 + 6 * 12), (2 * 112 + 3 * 12)
+Write-Ico $bmps "$scratch\qlow-aligned.ico"
+
+$sheet = New-Object System.Drawing.Bitmap (5 * 112 + 6 * 12), (112 + 2 * 12)
 $g = [System.Drawing.Graphics]::FromImage($sheet)
-$g.Clear([System.Drawing.Color]::FromArgb(255, 70, 70, 70))
-$bgs = @([System.Drawing.Color]::FromArgb(255, 32, 32, 32), [System.Drawing.Color]::FromArgb(255, 243, 243, 243))
-for ($r = 0; $r -lt 2; $r++) {
-  for ($i = 0; $i -lt $sizes.Count; $i++) {
-    $x = 12 + $i * (112 + 12); $y = 12 + $r * (112 + 12)
-    $br = New-Object System.Drawing.SolidBrush $bgs[$r]
-    $g.FillRectangle($br, $x, $y, 112, 112); $br.Dispose()
-    $g.InterpolationMode = 'NearestNeighbor'; $g.PixelOffsetMode = 'Half'
-    $g.DrawImage($bmps[$i], $x, $y, 112, 112)
-  }
+$g.Clear([System.Drawing.Color]::FromArgb(255, 32, 32, 32))
+for ($i = 0; $i -lt $sizes.Count; $i++) {
+  $g.InterpolationMode = 'NearestNeighbor'; $g.PixelOffsetMode = 'Half'
+  $g.DrawImage($bmps[$i], (12 + $i * (112 + 12)), 12, 112, 112)
 }
 $g.Dispose()
-$sheet.Save("$scratch\outglow-icon.png", [System.Drawing.Imaging.ImageFormat]::Png)
-'preview: 16 | 20 | 24 | 32 | 48, dark row then light row'
+$sheet.Save("$scratch\qlow-aligned.png", [System.Drawing.Imaging.ImageFormat]::Png)
+'written qlow-aligned.ico and preview'
