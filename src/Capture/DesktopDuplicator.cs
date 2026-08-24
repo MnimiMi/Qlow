@@ -66,6 +66,14 @@ public sealed class DesktopDuplicator : IDisposable
     private int _mipHeight;
 
     private bool _frameHeld;
+
+    /// <summary>
+    /// The single frame handed out over and over. Safe to reuse because the caller
+    /// samples it and is done with it inside one loop iteration; nothing downstream
+    /// keeps a reference — the serial writer receives processed bytes, not pixels.
+    /// </summary>
+    private readonly CapturedFrame _frame = new();
+
     private CapturedFrame? _last;
 
     public bool IsReady => _duplication != null;
@@ -184,17 +192,23 @@ public sealed class DesktopDuplicator : IDisposable
         try
         {
             var stride = (int)map.RowPitch;
-            var frame = new CapturedFrame
-            {
-                Width = _mipWidth,
-                Height = _mipHeight,
-                Stride = stride,
-                Pixels = new byte[stride * _mipHeight]
-            };
+            var needed = stride * _mipHeight;
 
-            System.Runtime.InteropServices.Marshal.Copy(map.DataPointer, frame.Pixels, 0, frame.Pixels.Length);
+            // One buffer, reused for the life of the duplication object. At 320x180
+            // it is 230 KB, well past the 85 KB threshold that sends an allocation
+            // straight to the large object heap — and that heap is only swept during
+            // a full collection. Allocating it thirty times a second would mean
+            // manufacturing large-heap garbage purely to hold a frame that is read
+            // and discarded within the same loop iteration.
+            if (_frame.Pixels.Length != needed) _frame.Pixels = new byte[needed];
+
+            _frame.Width = _mipWidth;
+            _frame.Height = _mipHeight;
+            _frame.Stride = stride;
+
+            System.Runtime.InteropServices.Marshal.Copy(map.DataPointer, _frame.Pixels, 0, needed);
             FramesDownscaled++;
-            return frame;
+            return _frame;
         }
         finally
         {

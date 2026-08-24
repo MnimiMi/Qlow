@@ -63,19 +63,19 @@ public static class Bench
         // ---- Capture and readback -------------------------------------------------
         Say("CAPTURE: grab, GPU mip chain, readback to system memory");
         Say("");
-        Say("  requested   mip     readback     per frame    per frame   ceiling");
-        Say("      width  size        bytes       mean ms      p95 ms       fps");
-        Say("  --------------------------------------------------------------------");
+        Say("  requested   mip     readback     per frame    per frame   ceiling  allocated");
+        Say("      width  size        bytes       mean ms      p95 ms       fps  per frame");
+        Say("  -------------------------------------------------------------------------------");
 
         foreach (var width in new[] { 1920, 1280, 640, 320, 160 })
         {
-            var (mip, bytes, mean, p95) = MeasureCapture(width);
+            var (mip, bytes, mean, p95, alloc) = MeasureCapture(width);
             if (mean <= 0)
             {
                 Say($"  {width,9}   {"failed",-12}");
                 continue;
             }
-            Say($"  {width,9}  {mip,-11}  {bytes,10:N0}  {mean,10:F2}  {p95,10:F2}  {1000 / mean,8:F0}");
+            Say($"  {width,9}  {mip,-11}  {bytes,10:N0}  {mean,10:F2}  {p95,10:F2}  {1000 / mean,8:F0}  {alloc,9:N0}");
         }
 
         Say("");
@@ -104,7 +104,7 @@ public static class Bench
             $"{config.Serial.BaudRate / 10.0 / (6 + layout.Count * 3):F1} fps.");
     }
 
-    private static (string Mip, long Bytes, double Mean, double P95) MeasureCapture(int desiredWidth)
+    private static (string Mip, long Bytes, double Mean, double P95, long AllocPerFrame) MeasureCapture(int desiredWidth)
     {
         using var duplicator = new DesktopDuplicator(0, desiredWidth);
 
@@ -113,12 +113,18 @@ public static class Bench
         while (duplicator.FramesDownscaled < 10 && warmupDeadline.Elapsed.TotalSeconds < 5)
             duplicator.TryGrab(100, out _);
 
-        if (duplicator.FramesDownscaled < 10) return ("", 0, 0, 0);
+        if (duplicator.FramesDownscaled < 10) return ("", 0, 0, 0, 0);
 
         var samples = new List<double>(300);
         var clock = new Stopwatch();
         var budget = Stopwatch.StartNew();
         long bytes = 0;
+
+        // Managed bytes allocated while grabbing. A readback buffer built fresh each
+        // frame would show up here at the full size of the frame; a reused one shows
+        // up as nothing at all.
+        var allocBefore = GC.GetAllocatedBytesForCurrentThread();
+        var framesBefore = duplicator.FramesDownscaled;
 
         while (samples.Count < 250 && budget.Elapsed.TotalSeconds < 8)
         {
@@ -136,13 +142,17 @@ public static class Bench
             samples.Add(clock.Elapsed.TotalMilliseconds);
         }
 
-        if (samples.Count == 0) return ("", 0, 0, 0);
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - allocBefore;
+        var grabbed = duplicator.FramesDownscaled - framesBefore;
+
+        if (samples.Count == 0) return ("", 0, 0, 0, 0);
 
         samples.Sort();
         var mean = samples.Average();
         var p95 = samples[Math.Min(samples.Count - 1, (int)(samples.Count * 0.95))];
+        var allocPerFrame = grabbed > 0 ? allocated / grabbed : 0;
 
-        return ($"{duplicator.MipWidth}x{duplicator.MipHeight}", bytes, mean, p95);
+        return ($"{duplicator.MipWidth}x{duplicator.MipHeight}", bytes, mean, p95, allocPerFrame);
     }
 
     private static (int PerZone, double Sample, double Pipeline) MeasureCpu(

@@ -65,9 +65,13 @@ public sealed class ColorPipeline
     /// </summary>
     public void WriteOrdered(byte[] dest, int ledIndex, byte r, byte g, byte b)
     {
-        var src = new[] { r, g, b };
         var o = ledIndex * 3;
         if (o + 2 >= dest.Length) return;
+
+        // On the stack rather than the heap: this runs per LED, and a shared field
+        // would be a race with the capture thread.
+        Span<byte> src = stackalloc byte[3];
+        src[0] = r; src[1] = g; src[2] = b;
 
         dest[o] = src[_order[0]];
         dest[o + 1] = src[_order[1]];
@@ -88,6 +92,11 @@ public sealed class ColorPipeline
         var (tr, tg, tb) = TemperatureScale(_color.TemperatureK);
         double minLum = Math.Clamp(_color.MinLuminance, 0, 255);
         var floorLuma = Math.Clamp(_color.MinBrightness, 0, 100) / 100.0 * 255.0;
+
+        // Reused for every LED. Allocated once on the stack, outside the loop: a
+        // three-element array per LED is 120 allocations a frame, 3600 a second,
+        // for a value that never outlives one iteration.
+        Span<double> src = stackalloc double[3];
 
         // Pass one: shape and smooth, writing straight into the output bytes.
         for (var i = 0; i < zones.Length; i++)
@@ -122,12 +131,9 @@ public sealed class ColorPipeline
             s.B += (c.B - s.B) * alpha;
             _state[i] = s;
 
-            var src = new[]
-            {
-                _gammaTable[(int)Math.Clamp(Math.Round(s.R), 0, 255)] * brightness,
-                _gammaTable[(int)Math.Clamp(Math.Round(s.G), 0, 255)] * brightness,
-                _gammaTable[(int)Math.Clamp(Math.Round(s.B), 0, 255)] * brightness
-            };
+            src[0] = _gammaTable[(int)Math.Clamp(Math.Round(s.R), 0, 255)] * brightness;
+            src[1] = _gammaTable[(int)Math.Clamp(Math.Round(s.G), 0, 255)] * brightness;
+            src[2] = _gammaTable[(int)Math.Clamp(Math.Round(s.B), 0, 255)] * brightness;
 
             ApplyBrightnessFloor(src, floorLuma);
 
@@ -153,7 +159,7 @@ public sealed class ColorPipeline
     /// This runs after gamma and brightness, so the floor is a real output level, and
     /// before the current limiter, which still has the last word.
     /// </summary>
-    private void ApplyBrightnessFloor(double[] rgb, double floorLuma)
+    private void ApplyBrightnessFloor(Span<double> rgb, double floorLuma)
     {
         if (floorLuma <= 0) return;
 
