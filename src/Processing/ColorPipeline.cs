@@ -17,6 +17,7 @@ public sealed class ColorPipeline
     private PowerConfig _power;
     private Rgb[] _state = Array.Empty<Rgb>();
     private byte[] _bytes = Array.Empty<byte>();
+    private byte[] _previous = Array.Empty<byte>();
     private int[] _order = { 0, 1, 2 };
 
     private double[] _gammaTable = Array.Empty<double>();
@@ -56,6 +57,7 @@ public sealed class ColorPipeline
     public void Reset()
     {
         Array.Clear(_state);
+        _previous = Array.Empty<byte>();
     }
 
     /// <summary>
@@ -144,6 +146,7 @@ public sealed class ColorPipeline
         }
 
         ApplyCurrentLimit();
+        ApplySlewLimit();
         return _bytes;
     }
 
@@ -224,6 +227,48 @@ public sealed class ColorPipeline
         _darkR = r / luma;
         _darkG = g / luma;
         _darkB = b / luma;
+    }
+
+    /// <summary>
+    /// Caps how far any channel may move in a single frame.
+    ///
+    /// Runs last, on the bytes that actually leave for the strip, because it is the
+    /// change in those numbers that the current follows. Applied per channel rather
+    /// than per frame: a limit on the total would still allow one violent step
+    /// somewhere, and it is the step that matters, not the average.
+    ///
+    /// Nothing is remembered when the limiter is off, so switching it on mid-run
+    /// starts from wherever the strip already is rather than from black.
+    /// </summary>
+    private void ApplySlewLimit()
+    {
+        var step = Math.Clamp(_color.MaxChangePerFrame, 0, 255);
+
+        if (step == 0)
+        {
+            if (_previous.Length != 0) _previous = Array.Empty<byte>();
+            return;
+        }
+
+        if (_previous.Length != _bytes.Length)
+        {
+            // First frame under the limit: adopt it whole, then constrain from here.
+            _previous = new byte[_bytes.Length];
+            _bytes.CopyTo(_previous, 0);
+            return;
+        }
+
+        for (var i = 0; i < _bytes.Length; i++)
+        {
+            var from = _previous[i];
+            var to = _bytes[i];
+            var delta = to - from;
+
+            if (delta > step) _bytes[i] = (byte)(from + step);
+            else if (delta < -step) _bytes[i] = (byte)(from - step);
+
+            _previous[i] = _bytes[i];
+        }
     }
 
     /// <summary>

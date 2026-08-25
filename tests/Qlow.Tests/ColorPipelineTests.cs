@@ -164,6 +164,52 @@ public class ColorPipelineTests
     }
 
     [Fact]
+    public void NeverMovesFurtherThanTheStepAllowsInOneFrame()
+    {
+        var pipeline = Plain(tweak: c => c.MaxChangePerFrame = 12);
+
+        // First frame under the limit is adopted whole; the cap starts after it.
+        pipeline.Process(One(0, 0, 0));
+
+        var second = pipeline.Process(One(255, 255, 255))[0];
+        var third = pipeline.Process(One(255, 255, 255))[0];
+
+        Assert.Equal(12, second);
+        Assert.Equal(24, third);
+    }
+
+    [Fact]
+    public void LimitsFallingJustAsMuchAsRising()
+    {
+        var pipeline = Plain(tweak: c => c.MaxChangePerFrame = 12);
+
+        pipeline.Process(One(255, 255, 255));
+        var next = pipeline.Process(One(0, 0, 0))[0];
+
+        Assert.Equal(243, next);
+    }
+
+    [Fact]
+    public void LetsSmallChangesThroughUntouched()
+    {
+        var pipeline = Plain(tweak: c => c.MaxChangePerFrame = 12);
+
+        pipeline.Process(One(100, 100, 100));
+        var next = pipeline.Process(One(105, 100, 100))[0];
+
+        Assert.Equal(105, next);
+    }
+
+    [Fact]
+    public void JumpsFreelyWhenTheStepLimitIsOff()
+    {
+        var pipeline = Plain();
+
+        pipeline.Process(One(0, 0, 0));
+        Assert.Equal(255, pipeline.Process(One(255, 255, 255))[0]);
+    }
+
+    [Fact]
     public void FallsBackToWhiteWhenTheFloorColourIsNotAHexValue()
     {
         var bytes = Plain(tweak: c =>

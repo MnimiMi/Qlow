@@ -100,6 +100,18 @@ public sealed class ColorConfig
     public int MinLuminance { get; set; } = 2;
     /// <summary>Set to 0 to disable white-balance correction.</summary>
     public int TemperatureK { get; set; }
+
+    /// <summary>
+    /// Largest step any channel may take in one frame, 0-255. 0 lets colours jump
+    /// as far as they like.
+    ///
+    /// This bounds how much the strip's current can change between frames, which
+    /// is what a bulk capacitor at the strip's power input does in hardware: a cut
+    /// from black to white across 120 LEDs is a step of several amps in one frame,
+    /// and that step is what rings on a shared ground. Capping it trades the speed
+    /// of hard cuts for a much gentler load.
+    /// </summary>
+    public int MaxChangePerFrame { get; set; }
 }
 
 public sealed class PowerConfig
