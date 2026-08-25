@@ -163,6 +163,7 @@ static uint32_t lastVccSampleMs = 0;
 static uint32_t lastDiagMs = 0;
 static uint32_t lastFadeMs = 0;
 static uint16_t fadeSteps = 0;
+static uint8_t  frameCounter = 0;
 
 void setup() {
   FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS);
@@ -361,6 +362,21 @@ static void readFrame() {
   }
 
   FastLED.show();
+
+  // The supply is at its worst right here, not on a timer. Every LED changes at
+  // once and the strip pulls its new current in a step, which rings on the shared
+  // ground. A sample every 20 ms is almost certain to miss that; a short burst
+  // straight after the latch lands inside the settling window.
+  //
+  // Only on some frames, because each conversion costs about 130 us and the
+  // serial link is still receiving.
+  if ((++frameCounter & 0x07) == 0) {
+    for (uint8_t i = 0; i < 8; i++) {
+      uint16_t v = readVccMv();
+      if (v > 0 && v < minVccMv) minVccMv = v;
+    }
+  }
+
   lastFrameMs = millis();
   everReceived = true;
 
