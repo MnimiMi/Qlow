@@ -191,6 +191,31 @@ Do not confuse it with `color.minLuminance`, which is the opposite end of the sa
 range: a noise gate that forces anything dimmer than it to black, so a nearly-dark
 zone does not shimmer on sensor noise.
 
+### If the controller keeps restarting
+
+A strip flashing its startup pattern, or blinking out for a moment and coming
+back, is the board restarting. `Qlow.exe --selftest` and the log will tell you
+whether the host ever stopped sending; if it did not, the fault is on the strip
+side.
+
+The usual cause is the step in current when every LED changes at once. At 120
+LEDs a cut from black to white swings several amps inside one frame, and on a
+shared ground that step is enough to upset the microcontroller. Two fixes, and
+they work on the same thing from opposite ends:
+
+- **1000 µF across the strip's power input**, at the point the supply arrives.
+  Smooths the step in hardware. This is the proper fix and worth doing anyway.
+- **`color.maxChangePerFrame`** caps how far any channel may move per frame, so
+  the step never gets large in the first place. At `12` a black-to-white cut
+  takes about seven tenths of a second instead of one frame, and the current step
+  is roughly a ninth of the size. `0` turns it off.
+
+The second needs no soldering and costs only the snap of hard cuts. Raise it to
+20 or 25 if transitions feel sluggish; the effect weakens but does not vanish.
+
+The bundled firmware also reports the supply voltage it measures and why it last
+restarted, which is usually enough to tell a power problem from a firmware one.
+
 ---
 
 ## 6. Two things worth fixing on the PC
