@@ -55,6 +55,7 @@ public sealed class Engine : IDisposable
     private volatile bool _testRunning;
 
     private DateTime _lastCaptureHealthyUtc = DateTime.UtcNow;
+    private DateTime _resumeCooldownUntilUtc = DateTime.MinValue;
     private DateTime _lastHealthLogUtc = DateTime.UtcNow;
     private DateTime _lastFpsSample = DateTime.UtcNow;
     private int _framesSinceSample;
@@ -415,6 +416,16 @@ public sealed class Engine : IDisposable
                 continue;
             }
 
+            // Nothing D3D-related happens until this passes. See the comment in
+            // OnPowerModeChanged: creating a device too soon after resume has crashed
+            // the whole process with an access violation the CLR cannot let this
+            // try/catch stop, so the guard has to sit before the call is ever made.
+            if (DateTime.UtcNow < _resumeCooldownUntilUtc)
+            {
+                Thread.Sleep(150);
+                continue;
+            }
+
             _duplicator ??= new DesktopDuplicator(config.Capture.MonitorIndex, config.Capture.DownscaleWidth);
 
             var frameIntervalMs = 1000.0 / Math.Clamp(config.Capture.TargetFps, 1, 240);
@@ -524,6 +535,16 @@ public sealed class Engine : IDisposable
                 _lastCaptureHealthyUtc = DateTime.UtcNow;
                 _duplicator?.Invalidate("resumed from sleep");
                 _link.ForceReconnect("resumed from sleep");
+
+                // The display driver is not necessarily ready the instant this event
+                // fires. Calling D3D11CreateDevice into that window has been observed
+                // to raise AccessViolationException from inside the native driver —
+                // a corrupted-state exception the CLR will not let managed code catch,
+                // so the whole process dies with no chance to log anything. The only
+                // real defence is not making the call yet. Held here rather than as a
+                // flat startup delay so it only costs time right after a resume.
+                _resumeCooldownUntilUtc = DateTime.UtcNow.AddSeconds(5);
+                Log.Info("Holding capture for 5s to let the display driver settle after resume");
                 break;
         }
 
